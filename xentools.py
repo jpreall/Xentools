@@ -79,7 +79,7 @@ def TP10K(adata):
     counts = adata.layers['counts']
     adata.layers['TP10K'] = sparse.csr_matrix(10000*(counts / np.sum(counts, axis=1).A1[:,None]))
 
-def create_bins(df, bin_size=3):
+def create_bins(df, bin_size=5):
     # Determine the range of x and y values
     x_min, x_max = df['x_location'].min(), df['x_location'].max()
     y_min, y_max = df['y_location'].min(), df['y_location'].max()
@@ -756,7 +756,12 @@ def import_cell_annotations(
     xdata: XenData,
     cell_annotations_file):
     """
-    Imports
+    Imports cell annotations from a CSV file into the XenData object.
+    The CSV file should contain a column with the same name as the first column in the
+    xdata.adata.obs DataFrame. The annotations will be added to the xdata.adata.obs DataFrame.
+    Parameters:
+    - xdata: XenData object containing transcript data.
+    - cell_annotations_file: path to the CSV file containing cell annotations.  
     """
     anno = pd.read_csv(cell_annotations_file, index_col=0)
     groups_col = anno.columns[0]

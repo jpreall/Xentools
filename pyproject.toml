@@ -1,0 +1,10 @@
+[project]
+name = "xentools"
+version = "0.1.0"
+description = "Tools for XEN analysis"
+authors = [{name = "Jonathan Preall", email = "jpreall@cshl.edu"}]
+dependencies = []
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
