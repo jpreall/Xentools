@@ -7,6 +7,23 @@ import glob, os, sys
 import scanpy as sc
 import json
 import geopandas as gpd
+import re
+from typing import Union
+
+
+__all__ = ['XenData', 
+           'read_xen_panel', 
+           'read_json', 
+           'prep_for_inference', 
+           'create_bins', 
+           'bin_expression', 
+           'create_binned_image', 
+           'create_polygon', 
+           'generate_palette', 
+           'plot_palette',
+            'TP10K',
+            'plot_binned_rgb',
+            'plot_binned_greyscale',]
 
 possible_jpplot_paths = [
     '/Users/jpreall/CSHL Dropbox Team Dropbox/Jon Preall/Preall_Lab/Preall/scripts/jpplot/master/',
@@ -54,7 +71,7 @@ def _make_gene_panel_df(gene_panel_dict):
         COVERAGE = target['info']['gene_coverage']
         PAN_ID = target['source']['identity']['design_id']
         PAN_NAME = target['source']['identity']['name']
-        PAN_VERS = target['source']['identity']['version']
+        
     
         out[GENE_NAME] = {}
         out[GENE_NAME]['Gene_ID'] = ID
@@ -62,7 +79,11 @@ def _make_gene_panel_df(gene_panel_dict):
         out[GENE_NAME]['Coverage'] = COVERAGE
         out[GENE_NAME]['Panel_ID'] = PAN_ID
         out[GENE_NAME]['Panel_Name'] = PAN_NAME
-        out[GENE_NAME]['Panel_Version'] = PAN_VERS
+
+        # Add the panel version if it exists
+        if 'version' in target['source']['identity'].keys():
+            PAN_VERS = target['source']['identity']['version']
+            out[GENE_NAME]['Panel_Version'] = PAN_VERS
     
     paneldf = pd.DataFrame.from_dict(out, orient='index')
     return paneldf
@@ -79,7 +100,45 @@ def TP10K(adata):
     counts = adata.layers['counts']
     adata.layers['TP10K'] = sparse.csr_matrix(10000*(counts / np.sum(counts, axis=1).A1[:,None]))
 
+
+def um_to_pixels(
+        arr: Union[
+        np.typing.ArrayLike,        # covers list, tuple, np.ndarray
+        "pd.Series",          # forward ref; avoids hard dep on pandas
+        ],
+        pixel_size: float = 0.2125
+    ) -> np.ndarray:
+
+    """
+    Convert array-like numerical input from microns to pixels.
+
+    Parameters
+    ----------
+    arr : array-like
+        Numerical data in microns. Can be list, tuple, np.ndarray, or pandas Series.
+    pixel_size : float, default=0.2125
+        Microns per pixel.
+
+    Returns
+    -------
+    np.ndarray of int
+        Converted values in pixels (rounded to nearest integer).
+    """
+    arr = np.asarray(arr, dtype=float)  # safely converts most array-like
+    return np.round(arr / pixel_size).astype(int)
+
 def create_bins(df, bin_size=5):
+    """
+    Create bin edges transcript-level data for rasterization.
+
+    Parameters:
+    - df: DataFrame containing 'x_location' and 'y_location' columns. Usually read from transcripts.parquet.
+    - bin_size: size of the bins.
+    Returns:
+    - x_edges: array of bin edges for x coordinates.
+    - y_edges: array of bin edges for y coordinates.
+    """
+
     # Determine the range of x and y values
     x_min, x_max = df['x_location'].min(), df['x_location'].max()
     y_min, y_max = df['y_location'].min(), df['y_location'].max()
@@ -90,6 +149,15 @@ def create_bins(df, bin_size=5):
     return x_edges, y_edges
 
 def bin_expression(df, bin_size=5, normalize=False):
+    """
+    Bin the transcript data into a 2D histogram.
+    Parameters:
+    - df: DataFrame containing 'x_location' and 'y_location' columns. Usually read from transcripts.parquet.
+    - bin_size: size of the bins for rasterization.
+    - normalize: if True, normalize the counts to [0, 1].
+    Returns:
+    - counts: 2D numpy array representing the binned counts.
+    """
     # Create bins
     x_edges, y_edges = create_bins(df, bin_size=bin_size)
 
@@ -173,7 +241,7 @@ def create_polygon(df):
     """
     return Polygon(zip(df.vertex_x, df.vertex_y))
 
-def prep_for_inference(xenium_output_folder):
+def read_xenium_to_anndata(xenium_output_folder):
     xdir = xenium_output_folder
     #print(xdir)
     # Choose which file to load the cell feature matrix from
@@ -185,12 +253,13 @@ def prep_for_inference(xenium_output_folder):
 
     # Read in cell-level metadata
     cells = pd.read_parquet(f'{xdir}/cells.parquet')
-    cells.index = cells['cell_id']
+    cells.index = cells['cell_id'].astype('str')
     adata.obsm['spatial'] = cells.loc[:,['x_centroid','y_centroid']].values
 
     # Read in UMAP coords
     umap_file = xdir + '/analysis/umap/gene_expression_2_components/projection.csv'
     umap_coords = pd.read_csv(umap_file, index_col=0)
+    umap_coords.index = umap_coords.index.astype('str')
     keep_cells = [name for name in adata.obs_names if name in umap_coords.index]
 
     # Thow out any cells without UMAP coords
@@ -205,7 +274,7 @@ def prep_for_inference(xenium_output_folder):
     xrange = adata.obsm['spatial'][:,0].max() - adata.obsm['spatial'][:,0].min()
     yrange = adata.obsm['spatial'][:,1].max() - adata.obsm['spatial'][:,1].min()
     aspect_ratio = xrange/yrange
-    pl.rcParams['figure.figsize'] = [4*aspect_ratio,4]
+    #pl.rcParams['figure.figsize'] = [4*aspect_ratio,4]
 
     # Read in gene panel
     gene_panel = read_xen_panel(xdir + '/gene_panel.json')
@@ -216,9 +285,10 @@ def prep_for_inference(xenium_output_folder):
     adata.uns['genome'] = species
 
     # Start Scanpy Pipeline
-    adata.layers['counts'] = adata.X.copy()
-    adata.obs['n_counts'] = adata.X.sum(1).A1
-    adata.obs['n_genes'] = np.sum(adata.X > 0, axis=1).A1
+    adata.layers['counts'] = adata.X.astype('int').copy()
+    adata.obs['n_counts'] = adata.X.sum(1).A1.astype('int')
+    adata.var['total_counts'] = adata.X.sum(0).A1.astype('int')
+    adata.obs['n_genes'] = np.sum(adata.X > 0, axis=1).A1.astype('int')
     adata.obs['logUMIs'] = np.log(adata.obs['n_counts'] + 1)
 
     TP10K(adata)
@@ -233,7 +303,9 @@ def prep_for_inference(xenium_output_folder):
     for f in cfiles:
         cname = f.split('/')[-2].replace('gene_expression_','')
         #print(cname)
-        clusters = pd.read_csv(f, index_col=0)['Cluster'].rename(cname).loc[adata.obs_names].astype('str').astype('category')
+        clusterdf = pd.read_csv(f, index_col=0)
+        clusterdf.index = clusterdf.index.astype('str')
+        clusters = clusterdf['Cluster'].rename(cname).loc[adata.obs_names].astype('str').astype('category')
         res = pd.concat([res,clusters], axis=1)
     adata.obs[res.columns] = res
 
@@ -247,35 +319,51 @@ def read_xen_essentials(xenium_folder, verbose = True):
     transcripts_file = f'{xenium_folder}/transcripts.parquet'
     clusters_file = f'{xenium_folder}/analysis/clustering/gene_expression_graphclust/clusters.csv'
     nucboundaries_file = f'{xenium_folder}/nucleus_boundaries.parquet'
+    
 
+    """
     if verbose:
         print('Reading Cell Boundaries')
     celldata = pd.read_parquet(cellboundaries_file)
     celldata.set_index('cell_id', inplace=True)
+    celldata.index = celldata.index.astype('str')
     celldata['cell'] = celldata.index.copy()
 
     if verbose:
         print('Reading Nuclear Boundaries')
     nuc = pd.read_parquet(nucboundaries_file)
     nuc.set_index('cell_id', inplace=True)
+    nuc.index = nuc.index.astype('str')
     nuc['cell'] = nuc.index.copy()
+    """
 
     if verbose:
         print('Reading Clusters')
     clusters = pd.read_csv(clusters_file, index_col=0)
+    clusters.index = clusters.index.astype('str')
     clusters['Cluster'] = clusters['Cluster'].astype('str')
-    celldata['cluster'] = celldata.index.map(clusters['Cluster'].to_dict())
-    celldata['cluster'] = celldata['cluster'].astype('category')
+    #celldata['cluster'] = celldata.index.map(clusters['Cluster'].to_dict())
+    #celldata['cluster'] = celldata['cluster'].astype('category')
     color_key = dict(zip(clusters['Cluster'].unique(),sc.pl.palettes.default_28))
-    celldata['color'] = celldata['cluster'].map(color_key)
+    #celldata['color'] = celldata['cluster'].map(color_key)
     
     if verbose:
         print('Reading Transcripts')
     trans = pd.read_parquet(transcripts_file)
 
+    ## Sanitize in case of bytes:
+    sample = trans["feature_name"].iloc[:100]
+    # If any are bytes, run the C‐level vectorized decode
+    if sample.map(lambda x: isinstance(x, (bytes, bytearray))).any():
+    # This uses the fast C implementation under the hood
+        trans["feature_name"] = trans["feature_name"].str.decode("utf-8")
+    # 3) Ensure pandas knows it’s a true string column
+    #trans["feature_name"] = trans["feature_name"].astype("string")
+
     gene_panel = read_xen_panel(panel_file)
 
-    return celldata, trans, nuc, clusters, gene_panel
+    return trans, clusters, gene_panel
+    #return celldata, trans, nuc, clusters, gene_panel
 
 def frame(transcripts_df):
     xmin,xmax = transcripts_df['x_location'].min(),transcripts_df['x_location'].max()
@@ -341,14 +429,15 @@ class XenData:
     def __init__(self, xenium_folder, verbose=True):
         import json
         # Read data using your existing function
-        self.celldata, self.trans, self.nucdata, self.clusters, self.gene_panel = read_xen_essentials(xenium_folder, verbose)
+        #self.celldata, self.trans, self.nucdata, self.clusters, self.gene_panel = read_xen_essentials(xenium_folder, verbose)
+        self.trans, self.clusters, self.gene_panel = read_xen_essentials(xenium_folder, verbose)
         
         # You can also include other processing or attributes if needed
         # For example, you could compute additional derived attributes here
         if verbose:
             print('Reading in AnnData object')
-        self.adata = prep_for_inference(xenium_folder)
-        jpplot.ncounts(self.adata)
+        self.adata = read_xenium_to_anndata(xenium_folder)
+        #jpplot.ncounts(self.adata)
 
         # Add cluster information to the AnnData object
         self.adata.obs = self.adata.obs.merge(self.clusters, left_index=True, right_index=True, how='left')
@@ -371,12 +460,15 @@ class XenData:
         # Read in cell and nucleus boundaries
         cell_boundaries_file = f'{xenium_folder}/cell_boundaries.parquet'
         nuc_boundaries_file = f'{xenium_folder}/nucleus_boundaries.parquet'
+
+        self.ROIs = {}
         
         if os.path.exists(cell_boundaries_file):
             print('Reading in cell boundaries')
             # Read in cell boundaries
             self.cell_boundaries = pd.read_parquet(cell_boundaries_file)
             self.cell_boundaries.set_index('cell_id', inplace=True)
+            self.cell_boundaries.index = self.cell_boundaries.index.astype('str')
             # Flip the y-coordinates to match the Xenium Ranger orientation
             #self.cell_boundaries['vertex_y'] = -(self.cell_boundaries['vertex_y'] - self.cell_boundaries['vertex_y'].max())
             self.cell_boundaries = gpd.GeoDataFrame(
@@ -391,6 +483,7 @@ class XenData:
             # Read in nucleus boundaries
             self.nucleus_boundaries = pd.read_parquet(nuc_boundaries_file)
             self.nucleus_boundaries.set_index('cell_id', inplace=True)
+            self.nucleus_boundaries.index = self.nucleus_boundaries.index.astype('str')
             # Flip the y-coordinates to match the Xenium Ranger orientation
             #self.nucleus_boundaries['vertex_y'] = -(self.nucleus_boundaries['vertex_y'] - self.nucleus_boundaries['vertex_y'].max())
             self.nucleus_boundaries = gpd.GeoDataFrame(
@@ -399,17 +492,28 @@ class XenData:
                     .apply(create_polygon), columns=['geometry'])
         else:
             self.nucleus_boundaries = None
+            
 
         # Clean up the cell and nucleus boundaries to make sure they match the celldata
         # This is important because the cell and nucleus boundaries may contain cells
         # that are not present in the celldata or transcript data
+
+        # Look for a morphology.ome.tiff file, save the path if it exists
+        self.images = {}
+        if os.path.exists(f'{xenium_folder}/morphology.ome.tif'):
+            self.images['DAPI'] = f'{xenium_folder}/morphology.ome.tif'
+
+        """
         if self.cell_boundaries is not None:
+            print('Cleaning up cell boundaries...')
             keep_cells = [name for name in self.cell_boundaries.index if name in self.celldata.index]
             self.cell_boundaries = self.cell_boundaries.loc[keep_cells]
 
         if self.nucleus_boundaries is not None:
+            print('Cleaning up nucleus boundaries...')
             keep_cells = [name for name in self.nucleus_boundaries.index if name in self.celldata.index]
             self.nucleus_boundaries = self.nucleus_boundaries.loc[keep_cells]
+        """
 
     def update_cell_names(self):
         self._cell_names = sorted(self.trans['cell_id'].unique())
@@ -432,6 +536,14 @@ class XenData:
         The frame is defined by the minimum and maximum x and y coordinates of the transcripts.
         """
         return frame(self.trans)
+    
+    @property
+    def aspect_ratio(self):
+        """
+        Returns the aspect ratio of the transcript data.
+        The aspect ratio is defined as the width divided by the height of the frame.
+        """
+        return (self.frame[0,1] - self.frame[0,0]) / (self.frame[1,1] - self.frame[1,0])
 
     @property
     def xmin(self):
@@ -493,19 +605,71 @@ class XenData:
             # Additional AnnData statistics if available
             summary.append(f"Number of Transcripts: {self.adata.X.nnz:,}")
             #summary.append(f"Number of Nuclei: {self.adata.obs['nuclei'].sum() if 'nuclei' in self.adata.obs.columns else 'N/A'}")
-        summary.append(f"-" * 50)
+        
+        if self.images != {}:
+            summary.append(f"Image Layers: {', '.join(self.images.keys())}")
 
+        summary.append(f"-" * 50)
         return "\n".join(summary)
 
     def __repr__(self):
         return str(self)
+    
+    def import_ROI_xeniumanalyzer(self, roi_csv_file, roi_name):
+        """
+        Imports a region of interest generated with the lasso tool in Xenium Analyzer.
+        Stores the ROI as a polygon, centroid, and points in the xdata.ROIs dictionary.
 
-    def crop_to_ROI(self, ROI):
+        Parameters:
+        - roi_csv_file: XenData object containing transcript data.
+        - roi_name: A human-readable name for this region (eg. Mouse ID + phenotype)
+        """
+
+        if roi_name is None:
+            roi_name = os.path.basename(roi_csv_file).replace('.csv','')
+            
+        import matplotlib.patches as patches
+
+        polydf = pd.read_csv(roi_csv_file,
+            comment='#')
+        
+        def polygon_centroid(pts):
+            x = pts[:,0]
+            y = pts[:,1]
+            
+            # ensure polygon is closed
+            if x[0] != x[-1] or y[0] != y[-1]:
+                x = np.append(x, x[0])
+                y = np.append(y, y[0])
+
+            # Shoelace formula
+            A = 0.5 * np.sum(x[:-1]*y[1:] - x[1:]*y[:-1])
+            Cx = (1/(6*A)) * np.sum((x[:-1] + x[1:]) * (x[:-1]*y[1:] - x[1:]*y[:-1]))
+            Cy = (1/(6*A)) * np.sum((y[:-1] + y[1:]) * (x[:-1]*y[1:] - x[1:]*y[:-1]))
+            
+            return Cx, Cy
+        
+        # Build and draw the polygon
+        pts = polydf[['X','Y']].to_numpy()
+        pts = pts/5
+        cx, cy = polygon_centroid(pts)
+        poly_kwargs = dict(closed=True, fill=False, edgecolor='aqua', linewidth=2)
+        poly = patches.Polygon(pts, **poly_kwargs)
+
+        self.ROIs[roi_name] = {
+            'polygon': poly,
+            'centroid': (cx, cy),
+            'points': pts,
+            'poly_kwargs': poly_kwargs,
+        }
+
+    def crop_to_ROI(self, ROI, selection=None):
         """
         Crop the data to a specified region of interest (ROI).
         Parameters:
         - ROI: a file path to a CSV file containing the ROI coordinates
         - or a numpy array with shape (n,2) where n is the number of points defining the ROI.
+        - selection: if ROI is a file, the name of the ROI to select (if multiple are present in the file)
         The ROI should be in the format [[x1, y1], [x2, y2], ...].
         """
         from shapely.geometry import Polygon, Point
@@ -513,7 +677,7 @@ class XenData:
 
         #check if ROI is a file or a numpy array
         if isinstance(ROI, str):
-            ROI = read_ROI_from_csv(ROI)
+            ROI, roi_area = read_ROI_from_csv(ROI, selection=selection)
         elif isinstance(ROI, np.ndarray):
             if ROI.shape[1] != 2:
                 raise ValueError("ROI must be a 2D numpy array with shape (n, 2).")
@@ -537,11 +701,14 @@ class XenData:
         # Filter celldata
         self.update_cell_names()
 
-        keep_cells = [name for name in self.cell_names if name in self.celldata.index]
-        self.celldata = self.celldata.loc[keep_cells]
+        #keep_cells = [name for name in self.cell_names if name in self.celldata.index]
+        #self.celldata = self.celldata.loc[keep_cells]
+        keep_cells = [name for name in self.cell_names if name in self.cell_boundaries.index]
+        self.cell_boundaries = self.cell_boundaries.loc[keep_cells]
 
         # Filter nucdata
-        self.nucdata = self.nucdata.loc[keep_cells]
+        #self.nucdata = self.nucdata.loc[keep_cells]
+        self.nucleus_boundaries = self.nucleus_boundaries.loc[keep_cells]
 
         # Filter clusters
         keep_cells = [name for name in self.cell_names if name in self.clusters.index]
@@ -551,10 +718,12 @@ class XenData:
         self.adata = self.adata[keep_cells,:].copy()
 
         # Filter cell and nucleus boundaries
-        keep_cells_boundaries = [name for name in self.cell_boundaries.index if name in self.celldata.index]
-        self.cell_boundaries = self.cell_boundaries.loc[keep_cells_boundaries]
-        self.nucleus_boundaries = self.nucleus_boundaries.loc[keep_cells_boundaries]
+        #keep_cells_boundaries = [name for name in self.cell_boundaries.index if name in self.celldata.index]
+        #self.cell_boundaries = self.cell_boundaries.loc[keep_cells_boundaries]
+        #self.nucleus_boundaries = self.nucleus_boundaries.loc[keep_cells_boundaries]
 
+        self.area = roi_polygon.area
+        
     def copy(self):
         import copy
         return copy.deepcopy(self)
@@ -656,13 +825,16 @@ class XenData:
 
     def create_binned_adata(self, 
         bin_size=5,
-        exclude_unassigned=True):
+        exclude_unassigned=True,
+        distance_to_nucleus: float=None):
         """
         Create a binned AnnData object from transcript data.
         Parameters:
         - xdata: XenData object containing transcript data.
         - bin_size: size of the bins for rasterization.
-        - include_unassigned: 
+        - exclude_unassigned: Exclude transcripts labeled as 'UNASSIGNED' in 'cell_id' column
+        - distance_to_nucleus: 
+
         Save the binned AnnData object to the xdata object.
         """
         import anndata as ad
@@ -674,6 +846,11 @@ class XenData:
         if exclude_unassigned:
             print('Using only transcripts assigned to cells/nuclei...')
             df = df[df['cell_id'] != 'UNASSIGNED'].copy()
+        
+        if distance_to_nucleus is not None:
+            print(f'Excluding transcripts further than {distance_to_nucleus}um from the nucleus...')
+            # Filter out transcripts that are further than distance_to_nucleus from the nucleus
+            df = df[df['nucleus_distance'] <= distance_to_nucleus].copy()
 
         # Determine the bin indices
         df['x_bin'] = (df['x_location'] // bin_size).astype(int)
@@ -718,7 +895,18 @@ class XenData:
         self.binned_adata.uns['bin_edges'] = np.arange(df['x_location'].min(), df['x_location'].max() + bin_size, bin_size)
         self.binned_adata.uns['bin_edges'] = np.arange(df['y_location'].min(), df['y_location'].max() + bin_size, bin_size)
 
-    def write_ome_tiff(self, genes, output_path):
+    def write_ome_tiff(self, genes, output_path, flip_y=False,
+                       compression='zlib'):
+        """
+        Write a multi-layer OME-TIFF image for specified genes from the binned AnnData object.
+        Parameters:
+        - genes: list of gene names to include in the image.
+        - output_path: path to save the OME-TIFF file.
+        - flip_y: if True, flip the y-axis of the image. Default is False.
+        - compression: compression method for the OME-TIFF file. Default is 'zlib'.
+
+        Note: The binned AnnData object must be created first using create_binned_adata().
+        """
         bin_size = self.binned_adata.uns['bin_size']
 
         if genes is None:
@@ -736,16 +924,140 @@ class XenData:
             f'{self.name}_multilayer_{bin_size}um.ome.tiff'
 
         imdata = create_multilayer_image(self, genes)
+        if flip_y:
+            # Flip the y-axis
+            imdata = imdata[::-1, :, :]
 
         _write_ome_tiff(imdata, 
-                       channel_names=genes, 
+                       channel_names=genes,
+                       compression=compression,
                        physical_size_x=bin_size,
                        physical_size_y=bin_size,
                        output_path=output_path)
     
-def read_ROI_from_csv(XenAna_csv_file):
-    ROI = pd.read_csv(XenAna_csv_file, comment='#').select_dtypes(np.number).values
-    return ROI
+def read_ROI_from_csv(csv_path, selection=None):
+    """
+    Read a Xenium Explorer ROI CSV and return (coords, area_um2).
+
+    Parameters
+    ----------
+    csv_path : str | Path
+        Path to the CSV exported from Xenium Explorer. Expected header lines:
+        #Selection names: name1, name2, ...
+        #Areas (µm^2): a1, a2, ...
+    selection : str | None
+        Region name to extract. If None and only one region exists, that region is returned.
+        If None and multiple regions exist, a ValueError is raised listing options.
+
+    Returns
+    -------
+    coords : (N, 2) float ndarray
+        X,Y coordinates for the requested region.
+    area_um2 : float | None
+        Area for the requested region in µm^2 (from header). None if not found.
+
+    Raises
+    ------
+    ValueError
+        If multiple regions exist and `selection` is not specified or cannot be matched.
+    """
+    from pathlib import Path
+    csv_path = Path(csv_path)
+
+    # --- Parse comment header for names and areas ---
+    header_lines = []
+    with csv_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#"):
+                header_lines.append(line.strip())
+            else:
+                break  # comments are at the top; stop once data starts
+
+    names_line = next((ln for ln in header_lines if ln.lower().startswith("#selection names")), None)
+    areas_line = next((ln for ln in header_lines if "areas" in ln.lower()), None)
+
+    def _parse_list_from_comment(line):
+        # e.g., "#Selection names: A, B, C" -> ["A","B","C"]
+        return [s.strip() for s in line.split(":", 1)[1].split(",")] if line and ":" in line else []
+
+    def _parse_float_list_from_comment(line):
+        # e.g., "#Areas (µm^2): 1.0, 2, 3.5" -> [1.0, 2.0, 3.5]
+        vals = _parse_list_from_comment(line)
+        out = []
+        for v in vals:
+            v_clean = re.sub(r"[^\d.+\-eE]", "", v)  # strip units/commas if present
+            try:
+                out.append(float(v_clean))
+            except ValueError:
+                out.append(np.nan)
+        return out
+
+    header_names = _parse_list_from_comment(names_line)
+    header_areas = _parse_float_list_from_comment(areas_line)
+
+    # Map area to name when lengths align; else leave as None per-name
+    area_map = {}
+    if header_names and header_areas and len(header_names) == len(header_areas):
+        area_map = dict(zip(header_names, header_areas))
+
+    # --- Read coordinate table (comments skipped automatically) ---
+    df = pd.read_csv(csv_path, comment="#")
+    if not {"Selection", "X", "Y"}.issubset(df.columns):
+        raise ValueError("CSV must contain columns: 'Selection', 'X', 'Y'.")
+
+    unique_selections = df["Selection"].astype(str).unique().tolist()
+
+    # If user did not specify selection:
+    if selection is None:
+        if len(unique_selections) == 1:
+            selection = unique_selections[0]
+        else:
+            opts = ", ".join(unique_selections)
+            raise ValueError(
+                "Multiple regions found. Please specify one of: "
+                f"{opts}"
+            )
+
+    # Try exact, then case-insensitive, then prefix/substring matches
+    sel = str(selection)
+    chosen = None
+    if sel in unique_selections:
+        chosen = sel
+    else:
+        # case-insensitive exact
+        ci_map = {s.lower(): s for s in unique_selections}
+        if sel.lower() in ci_map:
+            chosen = ci_map[sel.lower()]
+        else:
+            # prefix/substring (case-insensitive)
+            cands = [s for s in unique_selections if s.lower().startswith(sel.lower())]
+            if not cands:
+                cands = [s for s in unique_selections if sel.lower() in s.lower()]
+            if len(cands) == 1:
+                chosen = cands[0]
+            else:
+                opts = ", ".join(unique_selections)
+                raise ValueError(
+                    f"Selection '{selection}' not uniquely matched. "
+                    f"Available options: {opts}"
+                )
+
+    sub = df[df["Selection"].astype(str) == chosen]
+    if sub.empty:
+        raise ValueError(f"No coordinates found for selection '{chosen}'.")
+
+    coords = sub[["X", "Y"]].to_numpy(dtype=float)
+    area_um2 = area_map.get(chosen)
+    return coords, area_um2
+
+## DEPRECATED
+#def read_ROI_from_csv(XenAna_csv_file):
+#    """
+#    Xenium Explorer ROI files look like this:
+#    
+#    """
+#    ROI = pd.read_csv(XenAna_csv_file, comment='#').select_dtypes(np.number).values
+#    return ROI
 
 def ROI_to_pixels(ROI, pixel_size):
     xmin,xmax = int(ROI[:,0].min()/pixel_size),int(ROI[:,0].max()/pixel_size)
@@ -911,9 +1223,13 @@ def plot_binned_rgb(xdata,
     fig_scale=10,
     gammas=[1, 1, 1],
     log=False,
+    flip=True,
     ):
     """
     Creates an RGB image of binned gene expression profiles.
+    Can accept either:
+    - XenData object with binned transcript data.
+    - AnnData object with binned transcript data.
 
     Parameters:
     - xdata: XenData object containing transcript data.
@@ -922,12 +1238,28 @@ def plot_binned_rgb(xdata,
       and the value is a list of genes to combine into that channel.
     - norm: Normalization method ('per_gene' or 'global').
     - fig_scale: Scale of the figure for plotting.
-
+    - gammas: List of gamma correction values for each channel.
+    - log: If True, apply log transformation to the counts before plotting.
+    - flip: If True, flip the image upside down to match Scanpy and Xenium plotting orientation.
+    
     Returns:
     - None: Displays the RGB image with a legend.
     """
     from PIL import Image
     from matplotlib.patches import Patch
+    import anndata as ad
+
+    # Check if xdata is a XenData object with binned_adata
+    if hasattr(xdata, 'binned_adata'):
+        data = xdata.binned_adata
+    # If not, check if xdata is an AnnData object with binned transcript data in 'spatial' 
+    elif isinstance(xdata, ad.AnnData):
+        data = xdata
+        if 'spatial' not in data.obsm:
+            raise ValueError("AnnData object does not have spatial coordinates in obsm['spatial']. "
+                             "Please ensure the AnnData object has been properly prepared.")
+    else:
+        raise ValueError("Input must be a XenData object or an AnnData object with binned transcript data.")
     
 
     # Determine input type (list of genes or dictionary of gene sets)
@@ -948,7 +1280,7 @@ def plot_binned_rgb(xdata,
         raise ValueError("Input must be a list of genes or a dictionary of gene sets.")
     
     # Extract spatial coordinates (assume shape (n_bins, 2): columns x and y)
-    xy_coords = xdata.binned_adata.obsm['spatial']
+    xy_coords = data.obsm['spatial']
     x_coords = xy_coords[:, 0]
     y_coords = xy_coords[:, 1]
 
@@ -968,7 +1300,7 @@ def plot_binned_rgb(xdata,
 
     # Populate image with expression values per gene into corresponding RGB channels
     for n, (set_name,genes) in enumerate(gene_sets.items()):
-        expr = xdata.binned_adata[:, genes].X.todense().sum(1).A1
+        expr = data[:, genes].X.todense().sum(1).A1
         for xi, yi, intensity in zip(x_idx, y_idx, expr):
             imdata[yi, xi, n] = intensity
 
@@ -992,7 +1324,8 @@ def plot_binned_rgb(xdata,
             imdata[:, :, ch] = 0
 
     # Flip the image upside down to match Scanpy and Xenium plotting orientation
-    imdata = imdata[::-1, :, :]
+    if flip == True:
+        imdata = imdata[::-1, :, :]
 
     # Apply gamma correction to each channel if necessary
     for i in range(3):
@@ -1040,8 +1373,14 @@ def plot_binned_rgb(xdata,
     pl.tight_layout()
     pl.show()
 
-def _write_ome_tiff(image_array, channel_names, channel_ids=None, channel_colors=None,
-                   physical_size_x=5, physical_size_y=5, significant_bits=12,
+def _write_ome_tiff(image_array, 
+                    channel_names, 
+                    channel_ids=None, 
+                    channel_colors=None,
+                   physical_size_x=5, 
+                   physical_size_y=5, 
+                   significant_bits=12,
+                   compression='zlib',
                    output_path=None):
     import tifffile
 
@@ -1058,13 +1397,17 @@ def _write_ome_tiff(image_array, channel_names, channel_ids=None, channel_colors
     if channel_ids is None:
         channel_ids = [f"Channel:{i}" for i in range(C)]
 
-    # Rearrange from (Y, X, C) to (X, Y, Z, C, T) using XYZCT order.
-    # Note that SizeX and SizeY are taken from the spatial dimensions,
-    # and we insert singleton Z and T dimensions.
-    arr = np.transpose(image_array, (2, 0, 1))  # becomes (C, Y, X)
-    arr = arr[np.newaxis, :, np.newaxis, :, :]  # becomes (1, C, 1, Y, X)
+    # --- Rearrange from (Y, X, C) to XYZCT order. ---
+    # Insert singleton Z and T dimensions.
+    # arr = np.transpose(image_array, (2, 0, 1))  # becomes (C, Y, X) #DEPRECATED
+    # arr = arr[np.newaxis, :, np.newaxis, :, :]  # becomes (1, C, 1, Y, X) #DEPRECATED
+
+    def to_tczyx(a):  # (Y, X, C) -> (1, C, 1, Y, X)
+        return a.transpose(2, 0, 1)[np.newaxis, :, np.newaxis, :, :]
+    arr = to_tczyx(image_array)
 
     # Build channel metadata entries.
+    """
     channel_entries = []
     for i, name in enumerate(channel_names):
         if channel_colors is not None:
@@ -1073,8 +1416,34 @@ def _write_ome_tiff(image_array, channel_names, channel_ids=None, channel_colors
             entry = f'      <Channel ID="{channel_ids[i]}" Name="{name}" SamplesPerPixel="1" />'
         channel_entries.append(entry)
     channel_entries_str = "\n".join(channel_entries)
+    """
+
+    channel_entries = []
+    channel_maxes = image_array.reshape(-1, image_array.shape[2]).max(axis=0)
+    
+    for i, name in enumerate(channel_names):
+        max_val = float(channel_maxes[i])  # convert to float to avoid dtype issues in XML
+        color_attr = f' Color="{channel_colors[i]}"' if channel_colors is not None else ''
+        entry = f'''      <Channel ID="{channel_ids[i]}" Name="{name}" SamplesPerPixel="1"{color_attr}>
+            <DisplaySettings>
+            <DisplayRangeMin>0</DisplayRangeMin>
+            <DisplayRangeMax>{max_val}</DisplayRangeMax>
+            </DisplaySettings>
+        </Channel>'''
+        channel_entries.append(entry)
+    channel_entries_str = "\n".join(channel_entries)
 
     # Build the OME-XML metadata.
+    
+    # dtype name must be OME-compatible
+    dtype_name = {
+        np.dtype("uint8"): "uint8",
+        np.dtype("uint16"): "uint16",
+        np.dtype("float32"): "float",
+        np.dtype("float64"): "double",
+    }.get(image_array.dtype, image_array.dtype.name)
+    # in OME spec below, under Pixels:
+    # Try substituting in dtype_name.  WORKING: image_array.dtype.name
     ome_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
     <OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">
     <Image ID="Image:0">
@@ -1094,11 +1463,50 @@ def _write_ome_tiff(image_array, channel_names, channel_ids=None, channel_colors
 
     if output_path is None:
         output_path = f'multilayer_{physical_size_x}um.ome.tiff'
-    tifffile.imwrite(output_path, arr, description=ome_xml)
+    tifffile.imwrite(output_path, 
+                     arr,
+                     compression=compression,
+                     description=ome_xml)
 
-def create_multilayer_image(xdata, genes):
+def create_multilayer_image(xdata, genes, log=False):
+    """
+    Create a multilayer image from the binned AnnData object in xdata.
+    Can accept both XenData and AnnData objects as input.
+    Parameters:
+    - xdata: XenData object containing the binned AnnData object.
+    - genes: List of gene names to include in the image.
+    - log: If True, apply log transformation to the expression data before creating the image.
+    Returns:
+    - imdata: A 3D numpy array representing the image, with shape (height, width, n_genes).
+    """
+    import anndata as ad
+
+    # Determine if xdata is a XenData object or an AnnData object
+    if isinstance(xdata, XenData):
+        if not hasattr(xdata, 'binned_adata'):
+            raise ValueError("XenData object does not have a binned_adata attribute. "
+                             "Please create a binned AnnData object first using xdata.create_binned_adata().")
+        data = xdata.binned_adata
+    elif isinstance(xdata, ad.AnnData):
+        data = xdata
+        if 'spatial' not in data.obsm:
+            raise ValueError("AnnData object does not have spatial coordinates in obsm['spatial']. "
+                             "Please ensure the AnnData object has been properly prepared.")
+    else:
+        raise ValueError("Input must be a XenData object or an AnnData object with binned transcript data.")
+    # Check if genes is None or a string, and convert to list if necessary
+    if genes is None:
+        genes = data.var_names.tolist()
+
+    elif isinstance(genes, str):
+        genes = [genes]
+    # Ensure genes are present in the AnnData object
+    missing_genes = [gene for gene in genes if gene not in data.var_names]
+    if missing_genes:
+        raise ValueError(f"The following genes are not present in the binned AnnData object: {', '.join(missing_genes)}")
+
     # Get spatial coordinates (assumed to be in xdata.binned_adata.obsm['spatial'])
-    coords = xdata.binned_adata.obsm['spatial']
+    coords = data.obsm['spatial']
     x_coords = coords[:, 0]
     y_coords = coords[:, 1]
 
@@ -1114,17 +1522,24 @@ def create_multilayer_image(xdata, genes):
     imdata = np.zeros((h, w, n_genes), dtype=np.uint16)
 
     # Extract expression data for all genes at once
-    data = xdata.binned_adata[:, genes].X
+    data = data[:, genes].X
     # If data is sparse, convert to a dense array
     if hasattr(data, "toarray"):
         data = data.toarray()  # Shape: (n_cells, n_genes)
 
-    # Clip to 8-bit or 16-bit range, depending on the dynamic range of the data
-    if np.max(data) > 255:
-        data = np.clip(data, 0, 2**16 - 1).astype(np.uint16)
-    else:
-        # If the data fits in 8 bits, convert to uint8
+    if log:
+        # Apply log2 transformation to the expression data
+        data = np.log2(data + 1)
+        # scale to 8-bit range
         data = np.clip(data, 0, 255).astype(np.uint8)
+        
+    else:
+        # Clip to 8-bit or 16-bit range, depending on the dynamic range of the data
+        if np.max(data) > 255:
+            data = np.clip(data, 0, 2**16 - 1).astype(np.uint16)
+        else:
+            # If the data fits in 8 bits, convert to uint8
+            data = np.clip(data, 0, 255).astype(np.uint8)
 
     #data = np.clip(data, 0, 2**16 - 1).astype(np.uint16)
 
@@ -1135,3 +1550,97 @@ def create_multilayer_image(xdata, genes):
     imdata = imdata[::-1, :, :]
 
     return imdata
+
+def plot_binned_greyscale(xdata, 
+    genes, 
+    fig_scale=10,
+    gamma=1,
+    log=False,
+    flip=True,
+    return_img=False,
+    ):
+    """
+    Creates a greyscale image of binned gene expression profiles.
+    Can accept either:
+    - XenData object with binned transcript data.
+    - AnnData object with binned transcript data.
+
+    Parameters:
+    - xdata: XenData object containing transcript data.
+    - genes: a list of genes to combine
+    - fig_scale: Scale of the figure for plotting.
+    - gammas: List of gamma correction values for each channel.
+    - log: If True, apply log transformation to the counts before plotting.
+    - flip: If True, flip the image upside down to match Scanpy and Xenium plotting orientation.
+    
+    Returns:
+    - None: Displays the RGB image with a legend.
+    """
+    from PIL import Image
+    from matplotlib.patches import Patch
+    import anndata as ad
+
+    # Check if xdata is a XenData object with binned_adata
+    if hasattr(xdata, 'binned_adata'):
+        data = xdata.binned_adata
+    # If not, check if xdata is an AnnData object with binned transcript data in 'spatial' 
+    elif isinstance(xdata, ad.AnnData):
+        data = xdata
+        if 'spatial' not in data.obsm:
+            raise ValueError("AnnData object does not have spatial coordinates in obsm['spatial']. "
+                             "Please ensure the AnnData object has been properly prepared.")
+    else:
+        raise ValueError("Input must be a XenData object or an AnnData object with binned transcript data.")
+    
+    if isinstance(genes, str):
+        genes = [genes]
+    
+    # Extract spatial coordinates (assume shape (n_bins, 2): columns x and y)
+    xy_coords = data.obsm['spatial']
+    x_coords = xy_coords[:, 0]
+    y_coords = xy_coords[:, 1]
+
+    # Determine image bounds and dimensions
+    x_min, x_max = x_coords.min(), x_coords.max()
+    y_min, y_max = y_coords.min(), y_coords.max()
+    w = int(np.abs(x_max - x_min)) + 1
+    h = int(np.abs(y_max - y_min)) + 1
+    aspect_ratio = w / h
+
+    # Create an empty image array (height, width, 3)
+    imdata = np.zeros((h, w, 1))
+
+    # Convert spatial coordinates into image indices starting from zero
+    x_idx = (x_coords - x_min).astype(int)
+    y_idx = (y_coords - y_min).astype(int)
+
+    # Populate image with expression values per gene into corresponding RGB channels
+    
+    expr = data[:, genes].X.todense().sum(1).A1
+    imdata[y_idx, x_idx, 0] = expr
+
+    # log transform if specified
+    if log:
+        imdata = np.log1p(imdata)
+    
+    imdata = imdata[:,:,0]
+
+    norm_imdata = imdata / imdata.max()
+    imdata = np.round(255*(norm_imdata))
+
+    channel_norm = imdata[:, :] / 255.0
+    channel_corr = 255 * np.power(channel_norm, 1.0 / gamma)
+    imdata = np.clip(channel_corr, 0, 255)
+
+    if flip == True:
+        imdata = imdata[::-1, :]
+    
+    im = Image.fromarray(imdata)
+
+    if return_img:
+        return im
+    else:
+        fig, ax = pl.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
+        ax.imshow(im)
+        ax.axis('off')
+        pl.show()

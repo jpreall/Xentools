@@ -1,7 +1,11 @@
 import zarr
 import numpy as np
+import dask.array as da
+import dask.bag as db
 
-def read_transcripts_zarr_do_ddf(transcrips_zarr):
+__all__ = ['read_transcripts_zarr_do_ddf', 'retrieve_gene_density_zarr']
+
+def read_transcripts_zarr_to_ddf(transcrips_zarr):
     """
     Read transcript density from a Zarr store.
 
@@ -15,8 +19,6 @@ def read_transcripts_zarr_do_ddf(transcrips_zarr):
     ddf : dask.dataframe.DataFrame
         Dask DataFrame containing the transcript density.
     """
-    import dask.array as da
-    import dask.bag as db
     import dask.dataframe as dd
 
     # 1. Open the ZIP-compressed Zarr store
