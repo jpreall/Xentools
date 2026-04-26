@@ -1,0 +1,14 @@
+numpy
+pandas
+matplotlib
+scipy
+scanpy
+anndata
+geopandas
+shapely
+zarr
+dask
+pillow
+tifffile
+imagecodecs
+scikit-learn

@@ -1,3 +1,6 @@
+import pandas as pd
+
+
 def write_xenium_gene_groups(xen_gene_list_dict, output_file):
     """
     Writes a dictionary of gene lists to a CSV file that is 
@@ -25,13 +28,42 @@ def write_xenium_gene_groups(xen_gene_list_dict, output_file):
         for gene, groups in inverted_dict.items():
             f.write(f"{gene},{','.join(groups)}\n")
             
-   def _invert_xen_gene_list_dict(xen_gene_list_dict):
-        """
-        Inverts a dictionary of gene lists to a dictionary where each gene maps to a list of sets.
-        """
-        from collections import defaultdict
-        gene_to_sets = defaultdict(list)
-        for set_name, genes in xen_gene_list_dict.items():
-            for gene in genes:
-                gene_to_sets[gene].append(set_name)
-        return gene_to_sets
+def _invert_xen_gene_list_dict(xen_gene_list_dict):
+    """
+    Inverts a dictionary of gene lists to a dictionary where each gene maps to a list of sets.
+    """
+    from collections import defaultdict
+    gene_to_sets = defaultdict(list)
+    for set_name, genes in xen_gene_list_dict.items():
+        for gene in genes:
+            gene_to_sets[gene].append(set_name)
+    return gene_to_sets
+
+
+def extract_ome_channel_names(path):
+    """
+    Extract OME channel names from a TIFF file's OME-XML metadata.
+    Parameters
+    ----------
+    path : str
+        Path to the TIFF file.
+
+    Returns
+    -------
+    pd.Series
+        A pandas Series containing the channel names.
+    """
+    import tifffile
+    import xml.etree.ElementTree as ET
+    with tifffile.TiffFile(path) as tif:
+        xml = tif.ome_metadata  # raw XML string
+
+    root = ET.fromstring(xml)
+    ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+
+    channels = [
+        ch.attrib.get("Name")
+        for ch in root.findall(".//ome:Image[1]/ome:Pixels/ome:Channel", ns)
+    ]
+
+    return pd.Series(channels, name="channel")

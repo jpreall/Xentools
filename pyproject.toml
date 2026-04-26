@@ -1,9 +1,27 @@
 [project]
 name = "xentools"
 version = "0.1.0"
-description = "Tools for XEN analysis"
+description = "Tools for reading, plotting, and manipulating Xenium and Atera spatial transcriptomics outputs"
+readme = "README.md"
+requires-python = ">=3.10"
 authors = [{name = "Jonathan Preall", email = "jpreall@cshl.edu"}]
-dependencies = []
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "scanpy",
+    "anndata",
+    "geopandas",
+    "shapely",
+    "zarr",
+    "dask",
+    "Pillow",
+    "tifffile",
+    "imagecodecs",
+    "scikit-learn",
+    "pyarrow",
+]
 
 [build-system]
 requires = ["setuptools", "wheel"]
