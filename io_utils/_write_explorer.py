@@ -87,6 +87,23 @@ def _dedup_zarr_zip(zip_path):
         f.write(buf.getvalue())
 
 
+def _open_zarr_group_compat(zarr_module, store, mode="r", *, force_v2=False):
+    """
+    Open a Zarr group across Zarr 2 and 3.
+
+    Zarr 3 accepts ``zarr_format=2`` to force v2 metadata. Zarr 2 rejects that
+    keyword but already reads/writes v2 metadata natively.
+    """
+    kwargs = {"store": store, "mode": mode}
+    if force_v2:
+        try:
+            return zarr_module.open_group(**kwargs, zarr_format=2)
+        except TypeError as exc:
+            if "zarr_format" not in str(exc):
+                raise
+    return zarr_module.open_group(**kwargs)
+
+
 def _cluster_col_to_dir_name(col: str) -> str:
     """Map an adata.obs column name to Explorer's analysis subdirectory name."""
     if col == "Cluster":
@@ -215,7 +232,7 @@ _TRANSCRIPT_DEFAULTS = {
 
 def _materialize_transcripts(xdata) -> pd.DataFrame:
     """
-    Return a transcript DataFrame for the current (possibly cropped) XenData.
+    Return a transcript DataFrame for the current (possibly subsetted) XenData.
 
     Priority
     --------
@@ -239,7 +256,8 @@ def _materialize_transcripts(xdata) -> pd.DataFrame:
     except Exception:
         pass
 
-    roi_geometry = getattr(xdata, "active_roi", None)
+    subset_roi = getattr(xdata, "subset_roi", None)
+    roi_geometry = None if subset_roi is None else getattr(subset_roi, "geometry", subset_roi)
     if os.path.exists(parquet_path):
         df = pd.read_parquet(parquet_path)
         x_col = "x_location" if "x_location" in df.columns else "x_centroid"
@@ -470,7 +488,7 @@ def _write_cells_zarr(obs_names, cells_df, cell_bdf, nucleus_bdf, output_dir: Pa
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         store = ZipStore(store_path, mode="w")
-        root = zarr.open_group(store=store, mode="w", zarr_format=2)
+        root = _open_zarr_group_compat(zarr, store, mode="w", force_v2=True)
         compressor = _native_blosc_compressor()
 
         root.create_array("cell_id", data=cell_id_arr, chunks=cell_id_arr.shape, compressor=compressor)
@@ -594,7 +612,7 @@ def _write_cfm_zarr(adata, obs_names, output_dir: Path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         store = ZipStore(store_path, mode="w")
-        root = zarr.open_group(store=store, mode="w", zarr_format=2)
+        root = _open_zarr_group_compat(zarr, store, mode="w", force_v2=True)
         compressor = _native_blosc_compressor()
 
         cf = root.create_group("cell_features")
@@ -717,7 +735,7 @@ def _write_analysis_zarr(adata, obs_names, output_dir: Path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         store = ZipStore(store_path, mode="w")
-        root = zarr.open_group(store=store, mode="w", zarr_format=2)
+        root = _open_zarr_group_compat(zarr, store, mode="w", force_v2=True)
         compressor = _native_blosc_compressor()
 
         cg = root.create_group("cell_groups")
@@ -1057,7 +1075,7 @@ def _write_transcripts_zarr(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         store = ZipStore(store_path, mode="w")
-        root = zarr.open_group(store=store, mode="w", zarr_format=2)
+        root = _open_zarr_group_compat(zarr, store, mode="w", force_v2=True)
         compressor = _native_blosc_compressor()
         grids = root.create_group("grids")
 

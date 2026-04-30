@@ -6,8 +6,9 @@ scanpy
 anndata
 geopandas
 shapely
-zarr
+zarr>=2.18.3
 dask
+xarray
 pillow
 tifffile
 imagecodecs

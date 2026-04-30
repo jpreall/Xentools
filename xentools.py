@@ -9,9 +9,27 @@ import geopandas as gpd
 import re
 import shutil
 import uuid
-from typing import Union, Optional, Literal
+from dataclasses import dataclass, field
+from typing import Any, Union, Optional, Literal
 from scipy import sparse
 from matplotlib.patches import Patch
+
+
+def _open_zarr_group_compat(zarr_module, store, mode="r", *, force_v2=False):
+    """
+    Open a Zarr group across Zarr 2 and 3.
+
+    Zarr 3 accepts ``zarr_format=2`` so we can emit/read v2 metadata explicitly.
+    Zarr 2 rejects that keyword and already uses v2 metadata.
+    """
+    kwargs = {"store": store, "mode": mode}
+    if force_v2:
+        try:
+            return zarr_module.open_group(**kwargs, zarr_format=2)
+        except TypeError as exc:
+            if "zarr_format" not in str(exc):
+                raise
+    return zarr_module.open_group(**kwargs)
 
 
 
@@ -256,6 +274,83 @@ def import_segmentation_xenium_parquet(boundaries_file):
                     .apply(create_polygon), columns=['geometry'])
     return cell_boundaries
 
+
+def import_segmentation_xenium_zarr(cells_zarr_file, kind: Literal['cell', 'nucleus']='cell'):
+    """
+    Import cell or nucleus boundary polygons from `cells.zarr.zip`.
+
+    Polygons are stored in physical space under `/polygon_sets`, with:
+    - set `0` = nucleus
+    - set `1` = cell
+    """
+    import geopandas as gpd
+    import zarr
+    from shapely.geometry import Polygon
+
+    set_idx = '1' if kind == 'cell' else '0'
+    store = zarr.storage.ZipStore(cells_zarr_file, mode='r')
+    try:
+        root = _open_zarr_group_compat(zarr, store, mode='r', force_v2=True)
+        cell_ids_raw = root['cell_id'][:]
+        cell_ids = _encode_xenium_cell_ids(cell_ids_raw[:, 0], cell_ids_raw[:, 1]).astype(str)
+
+        grp = root[f'polygon_sets/{set_idx}']
+        cell_index = grp['cell_index'][:].astype(np.int64)
+        num_vertices = grp['num_vertices'][:].astype(np.int64)
+        vertices = grp['vertices'][:]
+    finally:
+        store.close()
+
+    geometries = {}
+    for i, (idx, nverts) in enumerate(zip(cell_index, num_vertices)):
+        if nverts <= 0:
+            continue
+        flat = vertices[i, : 2 * int(nverts)]
+        coords = flat.reshape(-1, 2)
+        if len(coords) < 4:
+            continue
+        geometries[str(cell_ids[idx])] = Polygon(coords)
+
+    gdf = gpd.GeoDataFrame(
+        {"geometry": pd.Series(geometries, dtype=object)},
+        geometry="geometry",
+    )
+    gdf.index.name = "cell_id"
+    return gdf
+
+
+class LazyBoundaryGeoDataFrame:
+    """
+    Deferred boundary loader that materializes a GeoDataFrame on first access.
+    """
+
+    def __init__(self, loader, label: str = "boundaries"):
+        self._loader = loader
+        self._label = label
+        self._data = None
+
+    def _materialize(self):
+        if self._data is None:
+            self._data = self._loader()
+        return self._data
+
+    def __getattr__(self, name):
+        return getattr(self._materialize(), name)
+
+    def __getitem__(self, key):
+        return self._materialize()[key]
+
+    def __len__(self):
+        return len(self._materialize())
+
+    def __iter__(self):
+        return iter(self._materialize())
+
+    def __repr__(self):
+        if self._data is None:
+            return f"LazyBoundaryGeoDataFrame({self._label}, unloaded)"
+        return repr(self._data)
+
 """
 if os.path.exists(cell_boundaries_file):
             print('Reading in cell boundaries')
@@ -417,11 +512,58 @@ def read_xen_essentials(xenium_folder, verbose = True):
     #return celldata, trans, nuc, clusters, gene_panel
 
 
-def _detect_transcripts_format(folder):
-    """Return 'zarr' if transcripts.zarr.zip exists, else 'parquet'."""
-    if os.path.exists(os.path.join(folder, 'transcripts.zarr.zip')):
+def _detect_transcripts_format(folder, transcript_source: Literal['auto', 'zarr', 'parquet']='auto'):
+    """
+    Resolve which transcript backing store to use.
+
+    `auto` preserves the historical preference for `transcripts.zarr.zip` when
+    present, otherwise falls back to `transcripts.parquet`.
+    """
+    has_zarr = os.path.exists(os.path.join(folder, 'transcripts.zarr.zip'))
+    has_parquet = os.path.exists(os.path.join(folder, 'transcripts.parquet'))
+
+    if transcript_source == 'zarr':
+        if not has_zarr:
+            raise FileNotFoundError(f"No transcripts.zarr.zip found in {folder}")
         return 'zarr'
-    return 'parquet'
+
+    if transcript_source == 'parquet':
+        if not has_parquet:
+            raise FileNotFoundError(f"No transcripts.parquet found in {folder}")
+        return 'parquet'
+
+    if has_zarr:
+        return 'zarr'
+    if has_parquet:
+        return 'parquet'
+    raise FileNotFoundError(
+        f"Could not find transcripts.zarr.zip or transcripts.parquet in {folder}"
+    )
+
+
+def _count_transcripts_in_bundle(folder):
+    """
+    Return transcript count using file metadata without materializing the table.
+    """
+    zarr_path = os.path.join(folder, 'transcripts.zarr.zip')
+    parquet_path = os.path.join(folder, 'transcripts.parquet')
+
+    if os.path.exists(zarr_path):
+        import zipfile
+        with zipfile.ZipFile(zarr_path) as zf:
+            if '.zattrs' in zf.namelist():
+                attrs = json.loads(zf.read('.zattrs').decode())
+                for key in ('number_rnas', 'num_transcripts'):
+                    if key in attrs:
+                        return int(attrs[key])
+
+    if os.path.exists(parquet_path):
+        import pyarrow.parquet as pq
+        return int(pq.ParquetFile(parquet_path).metadata.num_rows)
+
+    raise FileNotFoundError(
+        f"Could not determine transcript count: no transcripts.zarr.zip or transcripts.parquet in {folder}"
+    )
 
 
 def _encode_xenium_cell_ids(prefix_arr, suffix_arr):
@@ -464,7 +606,7 @@ def _read_zarr_adata(folder, verbose=True):
               end=' ', flush=True)
     store_cfm = zarr.storage.ZipStore(cfm_path, mode='r')
     try:
-        grp_cfm = zarr.open_group(store=store_cfm, mode='r', zarr_format=2)
+        grp_cfm = _open_zarr_group_compat(zarr, store_cfm, mode='r', force_v2=True)
         cf = grp_cfm['cell_features']
 
         csc_data    = cf['csc/data'][:]            # uint32
@@ -502,7 +644,7 @@ def _read_zarr_adata(folder, verbose=True):
         print('  Loading cell summaries from cells.zarr.zip...', end=' ', flush=True)
     store_cells = zarr.storage.ZipStore(cells_path, mode='r')
     try:
-        grp_cells    = zarr.open_group(store=store_cells, mode='r', zarr_format=2)
+        grp_cells = _open_zarr_group_compat(zarr, store_cells, mode='r', force_v2=True)
         cell_summary = grp_cells['cell_summary'][:]   # (n_cells, 8)
         cells_ids    = grp_cells['cell_id'][:, 0]     # integer prefix used for alignment
     finally:
@@ -588,7 +730,7 @@ def _read_analysis_zarr(folder, verbose=True):
     # ── 1. Read positional cell_id lookup from cells.zarr.zip ─────────────
     store_cells = zarr.storage.ZipStore(cells_path, mode='r')
     try:
-        grp_cells     = zarr.open_group(store=store_cells, mode='r', zarr_format=2)
+        grp_cells = _open_zarr_group_compat(zarr, store_cells, mode='r', force_v2=True)
         cell_ids_raw  = grp_cells['cell_id'][:]
         cell_ids      = cell_ids_raw[:, 0].astype(np.int64)   # integer prefix for positional lookup
     finally:
@@ -597,7 +739,7 @@ def _read_analysis_zarr(folder, verbose=True):
     # ── 2. Read groupings ─────────────────────────────────────────────────
     store_an = zarr.storage.ZipStore(analysis_path, mode='r')
     try:
-        grp_an = zarr.open_group(store=store_an, mode='r', zarr_format=2)
+        grp_an = _open_zarr_group_compat(zarr, store_an, mode='r', force_v2=True)
         attrs  = dict(grp_an['cell_groups'].attrs)
         grouping_names = attrs['grouping_names']   # list of str
         group_names    = attrs['group_names']      # list of list of str
@@ -669,6 +811,122 @@ def frame(transcripts_df):
     ymin,ymax = transcripts_df['y_location'].min(),transcripts_df['y_location'].max()
     return np.array([[xmin,xmax],[ymin,ymax]])
 
+
+def _normalize_feature_selection(features, available_features, arg_name="features"):
+    """Return an ordered feature list after validating membership."""
+    available = list(available_features)
+    if features is None:
+        return available
+    if isinstance(features, str):
+        features = [features]
+    selected = list(features)
+    missing = [f for f in selected if f not in set(available)]
+    if missing:
+        raise ValueError(
+            f"Some values in {arg_name} are not present in the dataset: "
+            + ", ".join(map(str, missing))
+        )
+    return selected
+
+
+def _bin_transcript_dataframe(df, bin_size, feature_names):
+    """
+    Aggregate a transcript table into a shared binning spec used by xarray and AnnData views.
+    """
+    feature_names = list(feature_names)
+    if bin_size <= 0:
+        raise ValueError("bin_size must be > 0.")
+
+    if df.empty:
+        return {
+            "feature_names": np.asarray(feature_names, dtype=object),
+            "x_bin_values": np.array([], dtype=int),
+            "y_bin_values": np.array([], dtype=int),
+            "x_centers_um": np.array([], dtype=float),
+            "y_centers_um": np.array([], dtype=float),
+            "feature_indices": np.array([], dtype=int),
+            "x_indices": np.array([], dtype=int),
+            "y_indices": np.array([], dtype=int),
+            "counts": np.array([], dtype=np.uint32),
+            "shape": (len(feature_names), 0, 0),
+            "occupied_x_bins": np.array([], dtype=int),
+            "occupied_y_bins": np.array([], dtype=int),
+            "bin_rows": np.array([], dtype=int),
+        }
+
+    work = df.loc[:, ["x_location", "y_location", "feature_name"]].copy()
+    work["x_bin"] = np.floor(work["x_location"] / bin_size).astype(int)
+    work["y_bin"] = np.floor(work["y_location"] / bin_size).astype(int)
+
+    grouped = (
+        work.groupby(["feature_name", "y_bin", "x_bin"])
+        .size()
+        .reset_index(name="count")
+    )
+
+    feature_index = {gene: i for i, gene in enumerate(feature_names)}
+    grouped = grouped[grouped["feature_name"].isin(feature_index)].copy()
+
+    if grouped.empty:
+        return {
+            "feature_names": np.asarray(feature_names, dtype=object),
+            "x_bin_values": np.array([], dtype=int),
+            "y_bin_values": np.array([], dtype=int),
+            "x_centers_um": np.array([], dtype=float),
+            "y_centers_um": np.array([], dtype=float),
+            "feature_indices": np.array([], dtype=int),
+            "x_indices": np.array([], dtype=int),
+            "y_indices": np.array([], dtype=int),
+            "counts": np.array([], dtype=np.uint32),
+            "shape": (len(feature_names), 0, 0),
+            "occupied_x_bins": np.array([], dtype=int),
+            "occupied_y_bins": np.array([], dtype=int),
+            "bin_rows": np.array([], dtype=int),
+        }
+
+    x_min_bin = int(grouped["x_bin"].min())
+    x_max_bin = int(grouped["x_bin"].max())
+    y_min_bin = int(grouped["y_bin"].min())
+    y_max_bin = int(grouped["y_bin"].max())
+
+    x_bin_values = np.arange(x_min_bin, x_max_bin + 1, dtype=int)
+    y_bin_values = np.arange(y_min_bin, y_max_bin + 1, dtype=int)
+    x_centers_um = (x_bin_values + 0.5) * float(bin_size)
+    y_centers_um = (y_bin_values + 0.5) * float(bin_size)
+
+    grouped["feature_index"] = grouped["feature_name"].map(feature_index).astype(int)
+    grouped["x_index"] = grouped["x_bin"] - x_min_bin
+    grouped["y_index"] = grouped["y_bin"] - y_min_bin
+
+    occupied_bins = (
+        grouped.loc[:, ["x_bin", "y_bin"]]
+        .drop_duplicates()
+        .sort_values(["y_bin", "x_bin"])
+        .reset_index(drop=True)
+    )
+    occupied_keys = list(zip(occupied_bins["x_bin"], occupied_bins["y_bin"]))
+    occupied_lookup = {key: i for i, key in enumerate(occupied_keys)}
+    grouped["bin_row"] = [
+        occupied_lookup[(x_bin, y_bin)]
+        for x_bin, y_bin in zip(grouped["x_bin"], grouped["y_bin"])
+    ]
+
+    return {
+        "feature_names": np.asarray(feature_names, dtype=object),
+        "x_bin_values": x_bin_values,
+        "y_bin_values": y_bin_values,
+        "x_centers_um": x_centers_um,
+        "y_centers_um": y_centers_um,
+        "feature_indices": grouped["feature_index"].to_numpy(dtype=int),
+        "x_indices": grouped["x_index"].to_numpy(dtype=int),
+        "y_indices": grouped["y_index"].to_numpy(dtype=int),
+        "counts": grouped["count"].to_numpy(dtype=np.uint32),
+        "shape": (len(feature_names), len(y_bin_values), len(x_bin_values)),
+        "occupied_x_bins": occupied_bins["x_bin"].to_numpy(dtype=int),
+        "occupied_y_bins": occupied_bins["y_bin"].to_numpy(dtype=int),
+        "bin_rows": grouped["bin_row"].to_numpy(dtype=int),
+    }
+
 def generate_palette(n, lightness=0.5, sat_min=0.5, sat_max=1.0, preview = False):
     """
     Generate a palette of n HEX colors.
@@ -723,6 +981,406 @@ def plot_palette(palette):
     ax.set_ylim(0, 1)
     ax.axis('off')  # Hide axes
     plt.show()
+
+
+@dataclass
+class ROI:
+    """
+    Lightweight ROI wrapper with a canonical plotting-bounds convention.
+
+    Public ``bounds`` always use ``(xmin, xmax, ymin, ymax)`` so plotting,
+    rasterization, and image cropping code do not need to remember shapely's
+    native ``(minx, miny, maxx, maxy)`` ordering.
+    """
+    geometry: Any
+    name: str | None = None
+    selection_name: str | None = None
+    class_name: str | None = None
+    poly_kwargs: dict[str, Any] = field(
+        default_factory=lambda: dict(closed=True, fill=False, edgecolor='yellow', linewidth=1)
+    )
+    source: str | None = None
+    units: str = "micron"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def shapely_bounds(self):
+        return tuple(map(float, self.geometry.bounds))
+
+    @property
+    def bounds(self):
+        minx, miny, maxx, maxy = self.shapely_bounds
+        return (minx, maxx, miny, maxy)
+
+    @property
+    def centroid(self):
+        c = self.geometry.centroid
+        return (float(c.x), float(c.y))
+
+    @property
+    def area(self):
+        return float(self.geometry.area)
+
+    @property
+    def area_um2(self):
+        return self.area
+
+    @property
+    def points(self):
+        return _geometry_to_roi_points(self.geometry)
+
+    def contains_points(self, x, y):
+        from shapely import contains_xy
+        return contains_xy(self.geometry, x, y)
+
+    def crop_dataframe(self, df, x_col="x_location", y_col="y_location"):
+        mask = self.contains_points(df[x_col].to_numpy(), df[y_col].to_numpy())
+        return df.loc[mask].copy()
+
+    def query_lazy_transcripts(self, lazy_transcripts, genes=None, quality="all"):
+        xmin, xmax, ymin, ymax = self.bounds
+        return lazy_transcripts.query(
+            xmin=xmin,
+            xmax=xmax,
+            ymin=ymin,
+            ymax=ymax,
+            genes=genes,
+            quality=quality,
+        )
+
+    def plot(self, ax, **kwargs):
+        """
+        Trace this ROI's outline over an existing matplotlib axis.
+        """
+        poly_kwargs = dict(self.poly_kwargs)
+        poly_kwargs.update(kwargs)
+        polygon = pl.Polygon(self.points, **poly_kwargs)
+        ax.add_patch(polygon)
+        return ax
+
+    def to_pixels(self, pixel_size, name=None):
+        from shapely.affinity import scale
+        factor = 1.0 / float(pixel_size)
+        return ROI.from_geometry(
+            scale(self.geometry, xfact=factor, yfact=factor, origin=(0, 0)),
+            name=self.name if name is None else name,
+            selection_name=self.selection_name,
+            class_name=self.class_name,
+            poly_kwargs=dict(self.poly_kwargs),
+            source=self.source,
+            units="pixel",
+            metadata=dict(self.metadata),
+        )
+
+    def to_microns(self, pixel_size, name=None):
+        from shapely.affinity import scale
+        factor = float(pixel_size)
+        return ROI.from_geometry(
+            scale(self.geometry, xfact=factor, yfact=factor, origin=(0, 0)),
+            name=self.name if name is None else name,
+            selection_name=self.selection_name,
+            class_name=self.class_name,
+            poly_kwargs=dict(self.poly_kwargs),
+            source=self.source,
+            units="micron",
+            metadata=dict(self.metadata),
+        )
+
+    def to_geojson_feature(self, include_name=True):
+        from shapely.geometry import mapping
+        props = dict(self.metadata)
+        if include_name and self.name is not None:
+            props.setdefault("name", self.name)
+        if self.selection_name is not None:
+            props.setdefault("selection_name", self.selection_name)
+        if self.class_name is not None:
+            props.setdefault("class_name", self.class_name)
+        if self.source is not None:
+            props.setdefault("source", self.source)
+        if self.units:
+            props.setdefault("units", self.units)
+        return {
+            "type": "Feature",
+            "properties": props,
+            "geometry": mapping(self.geometry),
+        }
+
+    def bbox(self, name=None, poly_kwargs=None):
+        from shapely.geometry import box as shapely_box
+        xmin, xmax, ymin, ymax = self.bounds
+        return ROI(
+            geometry=shapely_box(xmin, ymin, xmax, ymax),
+            name=self.name if name is None else name,
+            selection_name=self.selection_name,
+            class_name=self.class_name,
+            poly_kwargs=self.poly_kwargs if poly_kwargs is None else poly_kwargs,
+            source=self.source,
+            units=self.units,
+            metadata=dict(self.metadata),
+        )
+
+    @classmethod
+    def from_geometry(cls, geometry, name=None, selection_name=None, class_name=None, poly_kwargs=None, source=None, units="micron", metadata=None):
+        return cls(
+            geometry=geometry,
+            name=name,
+            selection_name=selection_name,
+            class_name=class_name,
+            poly_kwargs=dict(closed=True, fill=False, edgecolor='yellow', linewidth=1)
+            if poly_kwargs is None else poly_kwargs,
+            source=source,
+            units=units,
+            metadata={} if metadata is None else dict(metadata),
+        )
+
+    @classmethod
+    def from_bounds(cls, xmin, xmax, ymin, ymax, name=None, selection_name=None, class_name=None, poly_kwargs=None, source=None, units="micron", metadata=None):
+        from shapely.geometry import box as shapely_box
+        return cls.from_geometry(
+            shapely_box(float(xmin), float(ymin), float(xmax), float(ymax)),
+            name=name,
+            selection_name=selection_name,
+            class_name=class_name,
+            poly_kwargs=poly_kwargs,
+            source=source,
+            units=units,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def from_geojson(cls, geojson_path, feature=None, scale_factor=1.0, name=None, selection_name=None, class_name=None, poly_kwargs=None, source=None, units="micron", metadata=None):
+        geometry, area_um2 = read_ROI_from_geojson(
+            geojson_path,
+            feature=feature,
+            scale_factor=scale_factor,
+        )
+        roi_name = name
+        if roi_name is None and isinstance(feature, str):
+            roi_name = feature
+        roi = cls.from_geometry(
+            geometry,
+            name=roi_name,
+            selection_name=selection_name,
+            class_name=class_name,
+            poly_kwargs=poly_kwargs,
+            source=os.fspath(geojson_path) if source is None else source,
+            units=units,
+            metadata=metadata,
+        )
+        roi.metadata.setdefault("area_um2", area_um2)
+        return roi
+
+    def __getitem__(self, key):
+        legacy = {
+            "geometry": self.geometry,
+            "centroid": self.centroid,
+            "points": self.points,
+            "poly_kwargs": self.poly_kwargs,
+            "source": self.source,
+            "area_um2": self.area_um2,
+            "selection_name": self.selection_name,
+            "class_name": self.class_name,
+        }
+        if key in legacy:
+            return legacy[key]
+        if key in self.metadata:
+            return self.metadata[key]
+        raise KeyError(key)
+
+
+@dataclass
+class ROIClass:
+    name: str
+    rois: list[ROI] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def add(self, roi: ROI):
+        self.rois.append(roi)
+
+    @property
+    def bounds(self):
+        if not self.rois:
+            return (0.0, 0.0, 0.0, 0.0)
+        xmin = min(r.bounds[0] for r in self.rois)
+        xmax = max(r.bounds[1] for r in self.rois)
+        ymin = min(r.bounds[2] for r in self.rois)
+        ymax = max(r.bounds[3] for r in self.rois)
+        return (xmin, xmax, ymin, ymax)
+
+    @property
+    def union(self):
+        from shapely.ops import unary_union
+
+        geom = unary_union([roi.geometry for roi in self.rois]) if self.rois else None
+        if geom is None:
+            raise ValueError(f"ROI class '{self.name}' has no geometries.")
+        return ROI.from_geometry(
+            geom,
+            name=self.name,
+            class_name=self.name,
+            poly_kwargs=self.rois[0].poly_kwargs if self.rois else None,
+            source=self.rois[0].source if self.rois else None,
+            metadata=dict(self.metadata),
+        )
+
+    def plot(self, ax, **kwargs):
+        for roi in self.rois:
+            roi.plot(ax, **kwargs)
+        return ax
+
+    def __len__(self):
+        return len(self.rois)
+
+    def __iter__(self):
+        return iter(self.rois)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self.rois[key]
+        for roi in self.rois:
+            if roi.name == key or roi.selection_name == key:
+                return roi
+        raise KeyError(key)
+
+
+@dataclass
+class ROICollection:
+    classes: dict[str, ROIClass] = field(default_factory=dict)
+    flat_named: dict[str, ROI] = field(default_factory=dict)
+
+    def add(self, roi: ROI):
+        key = str(roi.name) if roi.name is not None else f"roi_{len(self.flat_named)}"
+        roi.name = key
+        self.flat_named[key] = roi
+        class_name = roi.class_name
+        if class_name is not None:
+            cls = self.classes.get(class_name)
+            if cls is None:
+                cls = ROIClass(name=class_name)
+                self.classes[class_name] = cls
+            cls.add(roi)
+
+    def class_names(self):
+        return list(self.classes.keys())
+
+    def selection_names(self):
+        return list(self.flat_named.keys())
+
+    def all_rois(self):
+        return list(self.flat_named.values())
+
+    @property
+    def union(self):
+        from shapely.ops import unary_union
+
+        rois = self.all_rois()
+        if not rois:
+            raise ValueError("ROI collection is empty.")
+        geom = unary_union([roi.geometry for roi in rois])
+        return ROI.from_geometry(
+            geom,
+            name="all_rois",
+            poly_kwargs=rois[0].poly_kwargs if rois else None,
+            source=rois[0].source if rois else None,
+            metadata=self.summary(),
+        )
+
+    def get_union(self, class_name):
+        return self.classes[class_name].union
+
+    def plot(self, ax, level: Literal['selection', 'class'] = 'selection', **kwargs):
+        if level == 'selection':
+            for roi in self.flat_named.values():
+                roi.plot(ax, **kwargs)
+        elif level == 'class':
+            for roi_class in self.classes.values():
+                roi_class.plot(ax, **kwargs)
+        else:
+            raise ValueError("level must be 'selection' or 'class'.")
+        return ax
+
+    def items(self):
+        return self.flat_named.items()
+
+    def keys(self):
+        return self.flat_named.keys()
+
+    def values(self):
+        return self.flat_named.values()
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def clear(self):
+        self.classes.clear()
+        self.flat_named.clear()
+
+    def summary(self):
+        return {
+            "n_selections": len(self.flat_named),
+            "n_classes": len(self.classes),
+            "classes": {name: len(cls.rois) for name, cls in self.classes.items()},
+        }
+
+    def import_file(self, roi_file, roi_name=None, pixel_size=1.0, scale_geojson=True, append=True):
+        if not append:
+            self.clear()
+        imported_names = _import_roi_records(
+            roi_store=self,
+            roi_file=roi_file,
+            roi_name=roi_name,
+            pixel_size=pixel_size,
+            scale_geojson=scale_geojson,
+        )
+        return imported_names
+
+    def to_geojson_feature_collection(self, level: Literal['selection', 'class'] = 'selection'):
+        if level == 'selection':
+            features = [roi.to_geojson_feature() for roi in self.flat_named.values()]
+        elif level == 'class':
+            features = [roi_class.union.to_geojson_feature() for roi_class in self.classes.values()]
+        else:
+            raise ValueError("level must be 'selection' or 'class'.")
+        return {"type": "FeatureCollection", "features": features}
+
+    def resolve(self, selector):
+        if isinstance(selector, ROI):
+            return selector
+        if isinstance(selector, ROIClass):
+            return selector.union
+        if isinstance(selector, int):
+            names = list(self.flat_named.keys())
+            if selector < 0 or selector >= len(names):
+                raise KeyError(selector)
+            return self.flat_named[names[selector]]
+        if isinstance(selector, str):
+            if selector in self.flat_named:
+                return self.flat_named[selector]
+            if selector in self.classes:
+                return self.classes[selector].union
+        raise KeyError(selector)
+
+    def __getitem__(self, key):
+        if key in self.flat_named:
+            return self.flat_named[key]
+        if key in self.classes:
+            return self.classes[key]
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        return key in self.flat_named or key in self.classes
+
+    def __len__(self):
+        return len(self.flat_named)
+
+    def __iter__(self):
+        return iter(self.flat_named)
+
+    def __bool__(self):
+        return bool(self.flat_named or self.classes)
 
 
 class LazyTranscripts:
@@ -793,7 +1451,7 @@ class LazyTranscripts:
         # Phase 2 — one representative coordinate per tile
         store = zarr.storage.ZipStore(self._path, mode='r')
         try:
-            grp = zarr.open_group(store=store, mode='r', zarr_format=2)
+            grp = _open_zarr_group_compat(zarr, store, mode='r', force_v2=True)
             for key in tile_keys:
                 try:
                     first = grp[f'grids/0/{key}/location'][0]  # loads first chunk; keep row 0
@@ -909,7 +1567,7 @@ class LazyTranscripts:
         store = zarr.storage.ZipStore(self._path, mode='r')
         frames = []
         try:
-            grp = zarr.open_group(store=store, mode='r', zarr_format=2)
+            grp = _open_zarr_group_compat(zarr, store, mode='r', force_v2=True)
             for key in tile_keys:
                 df = self._load_tile(grp, key, xmin, xmax, ymin, ymax, gene_ids, quality)
                 if df is not None and len(df):
@@ -1035,6 +1693,66 @@ class LazyTranscripts:
         """Materialise all transcripts into memory.  Use sparingly on large datasets."""
         return self.query(quality=quality)
 
+    def to_xarray_bins(self,
+                       bin_size=5,
+                       genes=None,
+                       bounds=None,
+                       quality='all',
+                       name='counts'):
+        """
+        Bin transcripts into a labeled xarray.DataArray with dims (feature_name, y, x).
+
+        This is the spatial-array view of transcript counts. It preserves the
+        physical micron coordinates of bin centers and is intended for image-like
+        operations such as smoothing, reductions, and per-gene raster access.
+        """
+        import xarray as xr
+
+        feature_names = _normalize_feature_selection(genes, self._gene_names, arg_name="genes")
+
+        if bounds is None:
+            df = self.query(genes=feature_names, quality=quality)
+        else:
+            xmin, xmax, ymin, ymax = map(float, bounds)
+            df = self.query(
+                xmin=xmin,
+                xmax=xmax,
+                ymin=ymin,
+                ymax=ymax,
+                genes=feature_names,
+                quality=quality,
+            )
+
+        binned = _bin_transcript_dataframe(df, bin_size=bin_size, feature_names=feature_names)
+        cube = np.zeros(binned["shape"], dtype=np.uint32)
+        if len(binned["counts"]):
+            cube[
+                binned["feature_indices"],
+                binned["y_indices"],
+                binned["x_indices"],
+            ] = binned["counts"]
+
+        attrs = {
+            "bin_size": float(bin_size),
+            "quality": quality,
+            "units": "micron",
+            "n_transcripts": int(binned["counts"].sum()),
+        }
+        if bounds is not None:
+            attrs["bounds"] = tuple(map(float, bounds))
+
+        return xr.DataArray(
+            cube,
+            dims=("feature_name", "y", "x"),
+            coords={
+                "feature_name": binned["feature_names"],
+                "y": binned["y_centers_um"],
+                "x": binned["x_centers_um"],
+            },
+            name=name,
+            attrs=attrs,
+        )
+
     def clear_cache(self):
         """Discard all cached query results."""
         self._query_cache.clear()
@@ -1050,33 +1768,70 @@ class LazyTranscripts:
 
 
 class XenData:
-    def __init__(self, xenium_folder, verbose=True, geojson_path=None, roi_feature=None,
-                 cache_threshold=5_000_000):
-        import json
+    def __init__(self, xenium_folder, verbose=True, roi_file=None, crop_to_selection=None,
+                 cache_threshold=5_000_000,
+                 transcript_source: Literal['auto', 'zarr', 'parquet']='auto',
+                 eager_transcript_threshold: int=20_000_000,
+                 boundary_source: Literal['auto', 'parquet', 'zarr']='auto',
+                 lazy_boundaries: bool=False):
         self.xenium_folder = xenium_folder
         self.cache_threshold = cache_threshold
-        self._transcripts_fmt = _detect_transcripts_format(xenium_folder)
+        self.eager_transcript_threshold = int(eager_transcript_threshold)
+        bundle_transcripts_fmt = _detect_transcripts_format(
+            xenium_folder,
+            transcript_source='auto',
+        )
+        resolved_transcript_source = transcript_source
+        self.n_transcripts = _count_transcripts_in_bundle(xenium_folder)
 
-        if self._transcripts_fmt == 'zarr':
-            # ── Atera / zarr-format dataset ───────────────────────────────
+        if (
+            transcript_source == 'auto'
+            and bundle_transcripts_fmt == 'zarr'
+            and os.path.exists(os.path.join(xenium_folder, 'transcripts.parquet'))
+            and self.n_transcripts < self.eager_transcript_threshold
+        ):
+            resolved_transcript_source = 'parquet'
+            if verbose:
+                print(
+                    f"Dataset has {self.n_transcripts:,} transcripts "
+                    f"(< {self.eager_transcript_threshold:,}); using transcripts.parquet."
+                )
+
+        self._transcripts_fmt = _detect_transcripts_format(
+            xenium_folder,
+            transcript_source=resolved_transcript_source,
+        )
+
+        if bundle_transcripts_fmt == 'zarr':
+            # ── Zarr-backed bundle; transcript source can still be overridden ──
             gene_names = _load_zarr_gene_names(xenium_folder)
-            zarr_path = os.path.join(xenium_folder, 'transcripts.zarr.zip')
-            if verbose:
-                print(f'Zarr format detected.  Indexing {len(gene_names):,} genes across '
-                      f'transcripts.zarr.zip...')
-            self.trans = LazyTranscripts(zarr_path, gene_names,
-                                         cache_threshold=cache_threshold,
-                                         verbose=verbose)
-            if verbose:
-                print(f'  {self.trans.n_transcripts:,} transcripts in '
-                      f'{len(self.trans._tile_meta)} spatial tiles.')
-            self.gene_panel = None
+            if self._transcripts_fmt == 'zarr':
+                zarr_path = os.path.join(xenium_folder, 'transcripts.zarr.zip')
+                if verbose:
+                    print(f'Zarr format detected.  Indexing {len(gene_names):,} genes across '
+                          f'transcripts.zarr.zip...')
+                self.trans = LazyTranscripts(zarr_path, gene_names,
+                                             cache_threshold=cache_threshold,
+                                             verbose=verbose)
+                if verbose:
+                    print(f'  {self.trans.n_transcripts:,} transcripts in '
+                          f'{len(self.trans._tile_meta)} spatial tiles.')
+            else:
+                if verbose:
+                    print('Using transcripts.parquet for rich transcript metadata...')
+                self.trans = pd.read_parquet(os.path.join(xenium_folder, 'transcripts.parquet'))
+                sample = self.trans["feature_name"].iloc[:100]
+                if sample.map(lambda x: isinstance(x, (bytes, bytearray))).any():
+                    self.trans["feature_name"] = self.trans["feature_name"].str.decode("utf-8")
+
+            panel_file = os.path.join(xenium_folder, 'gene_panel.json')
+            self.gene_panel = read_xen_panel(panel_file) if os.path.exists(panel_file) else None
             self.adata      = _read_zarr_adata(xenium_folder, verbose=verbose)
             self.clusters   = _read_analysis_zarr(xenium_folder, verbose=verbose)
             if len(self.clusters):
                 self.adata.obs = self.adata.obs.merge(
                     self.clusters, left_index=True, right_index=True, how='left')
-        elif self._transcripts_fmt == 'parquet':
+        elif bundle_transcripts_fmt == 'parquet':
             # ── Classic parquet-format dataset ────────────────────────────
             self.trans, self.clusters, self.gene_panel = read_xen_essentials(xenium_folder, verbose)
 
@@ -1093,8 +1848,32 @@ class XenData:
         # ── Common to both formats ─────────────────────────────────────────
         cell_boundaries_file = os.path.join(xenium_folder, 'cell_boundaries.parquet')
         nuc_boundaries_file  = os.path.join(xenium_folder, 'nucleus_boundaries.parquet')
+        cells_zarr_file = os.path.join(xenium_folder, 'cells.zarr.zip')
 
-        if os.path.exists(cell_boundaries_file):
+        has_boundary_parquet = os.path.exists(cell_boundaries_file) and os.path.exists(nuc_boundaries_file)
+        has_cells_zarr = os.path.exists(cells_zarr_file)
+
+        if boundary_source == 'parquet':
+            if not has_boundary_parquet:
+                raise FileNotFoundError(
+                    f"Requested boundary_source='parquet' but boundary parquet files were not found in {xenium_folder}"
+                )
+            resolved_boundary_source = 'parquet'
+        elif boundary_source == 'zarr':
+            if not has_cells_zarr:
+                raise FileNotFoundError(
+                    f"Requested boundary_source='zarr' but cells.zarr.zip was not found in {xenium_folder}"
+                )
+            resolved_boundary_source = 'zarr'
+        else:
+            if has_boundary_parquet:
+                resolved_boundary_source = 'parquet'
+            elif has_cells_zarr:
+                resolved_boundary_source = 'zarr'
+            else:
+                resolved_boundary_source = None
+
+        if resolved_boundary_source == 'parquet':
             if verbose:
                 print('Reading in cell boundaries')
             self.cell_boundaries = pd.read_parquet(cell_boundaries_file)
@@ -1104,10 +1883,7 @@ class XenData:
                 self.cell_boundaries
                     .groupby('cell_id')
                     .apply(create_polygon), columns=['geometry'])
-        else:
-            self.cell_boundaries = None
 
-        if os.path.exists(nuc_boundaries_file):
             if verbose:
                 print('Reading in nucleus boundaries')
             self.nucleus_boundaries = pd.read_parquet(nuc_boundaries_file)
@@ -1117,8 +1893,30 @@ class XenData:
                 self.nucleus_boundaries
                     .groupby('cell_id')
                     .apply(create_polygon), columns=['geometry'])
+        elif resolved_boundary_source == 'zarr':
+            if lazy_boundaries:
+                if verbose:
+                    print('Registering lazy Zarr-backed cell boundaries')
+                self.cell_boundaries = LazyBoundaryGeoDataFrame(
+                    lambda: import_segmentation_xenium_zarr(cells_zarr_file, kind='cell'),
+                    label='cell boundaries from cells.zarr.zip',
+                )
+                self.nucleus_boundaries = LazyBoundaryGeoDataFrame(
+                    lambda: import_segmentation_xenium_zarr(cells_zarr_file, kind='nucleus'),
+                    label='nucleus boundaries from cells.zarr.zip',
+                )
+            else:
+                if verbose:
+                    print('Reading in cell boundaries from cells.zarr.zip')
+                self.cell_boundaries = import_segmentation_xenium_zarr(cells_zarr_file, kind='cell')
+                if verbose:
+                    print('Reading in nucleus boundaries from cells.zarr.zip')
+                self.nucleus_boundaries = import_segmentation_xenium_zarr(cells_zarr_file, kind='nucleus')
         else:
+            self.cell_boundaries = None
             self.nucleus_boundaries = None
+        self._boundary_source = resolved_boundary_source
+        self._lazy_boundaries = bool(lazy_boundaries and resolved_boundary_source == 'zarr')
 
 
         xenium_file = os.path.join(xenium_folder, 'experiment.xenium')
@@ -1129,7 +1927,10 @@ class XenData:
         keys = ['run_name', 'slide_id', 'region_name']
         self.name = '_'.join([self.xenium_metadata[k] for k in keys])
 
-        self.ROIs = {}
+        self.ROIs = ROICollection()
+        self.rois = self.ROIs
+        self.active_roi = None
+        self.subset_roi = None
         self.update_cell_names()
 
         self.images = {}
@@ -1139,10 +1940,19 @@ class XenData:
         if self.protein_images is not None:
             self.images['Protein'] = self.protein_images['folder']
 
-        if geojson_path is not None:
+        if roi_file is not None:
             if verbose:
-                print(f'Cropping to ROI from GeoJSON: {geojson_path}')
-            self.crop_to_ROI(geojson_path, selection=roi_feature)
+                print(f'Importing ROIs from file: {roi_file}')
+            imported_roi_names = self.import_ROI(
+                roi_file,
+                scale_geojson=True,
+                append=False,
+            )
+            crop_target = _resolve_roi_selection_selector(self.ROIs, imported_roi_names, crop_to_selection)
+            if crop_target is not None:
+                if verbose:
+                    print(f'Subsetting to ROI selection/class: {crop_target}')
+                self.subset_to_roi(crop_target)
 
     def update_cell_names(self):
         if isinstance(self.trans, LazyTranscripts):
@@ -1211,6 +2021,28 @@ class XenData:
         """
         Returns a human-readable string summarizing the key statistics of the XenData object.
         """
+        def _boundary_status(boundary_obj, kind):
+            if boundary_obj is None:
+                return f"{kind}: unavailable"
+            if isinstance(boundary_obj, LazyBoundaryGeoDataFrame):
+                state = "loaded" if boundary_obj._data is not None else "lazy"
+                return f"{kind}: available ({self._boundary_source}, {state})"
+            try:
+                return f"{kind}: available ({self._boundary_source}, {len(boundary_obj):,})"
+            except Exception:
+                return f"{kind}: available ({self._boundary_source})"
+
+        def _roi_status():
+            summary = self.ROIs.summary()
+            parts = [f"{summary['n_selections']} selections"]
+            if summary["n_classes"]:
+                parts.append(f"{summary['n_classes']} classes")
+            if self.active_roi is not None:
+                parts.append(f"active={getattr(self.active_roi, 'name', 'roi')}")
+            if self.subset_roi is not None:
+                parts.append(f"subset={getattr(self.subset_roi, 'name', 'roi')}")
+            return ", ".join(parts)
+
         # Run info
         preserve = self.xenium_metadata.get('preservation_method','Unknown')
         major = self.xenium_metadata['major_version']
@@ -1232,23 +2064,44 @@ class XenData:
         
         # Cluster statistics
         total_clusters = len(self.clusters['Cluster'].unique()) if self.clusters is not None else 0
+        transcript_repr = (
+            "LazyTranscripts[zarr]"
+            if isinstance(self.trans, LazyTranscripts)
+            else f"DataFrame[parquet] ({len(self.trans):,} rows)"
+        )
+        adata_repr = (
+            f"{self.adata.n_obs:,} cells x {self.adata.n_vars:,} genes"
+            if hasattr(self, 'adata') and self.adata is not None
+            else "unavailable"
+        )
+        cluster_repr = (
+            f"{len(self.clusters.columns):,} columns, {total_clusters:,} unique clusters"
+            if self.clusters is not None and len(self.clusters.columns)
+            else "unavailable"
+        )
         
         # Build the summary string
         summary = []
         summary.append(f"XenData Summary:")
         summary.append(f"-" * 50)
         summary.append(f"Slide/Region Name: {self.name}")
+        summary.append(f"Folder: {self.xenium_folder}")
         summary.append(f"Xenium Kit Version: {kit_version}")
         summary.append(f"Panel: {panel_info}")
+        summary.append(f"Transcripts: {transcript_repr}")
+        summary.append(f"AnnData: {adata_repr}")
         summary.append(f"Number of Unique Cells: {total_cells:,}")
         summary.append(f"Number of Genes: {total_genes:,}")
-        summary.append(f"Number of Clusters: {total_clusters}")
+        summary.append(f"Clusters: {cluster_repr}")
         #summary.append(f"Cells Marked as Unassigned: {'Yes' if unassigned_cells > 0 else 'No'}")
         
         if hasattr(self, 'adata') and self.adata is not None:
             # Additional AnnData statistics if available
             summary.append(f"Number of Transcripts: {self.adata.X.nnz:,}")
             #summary.append(f"Number of Nuclei: {self.adata.obs['nuclei'].sum() if 'nuclei' in self.adata.obs.columns else 'N/A'}")
+
+        summary.append(f"Boundaries: {_boundary_status(self.cell_boundaries, 'cell')}; {_boundary_status(self.nucleus_boundaries, 'nucleus')}")
+        summary.append(f"ROIs: {_roi_status()}")
         
         if self.images != {}:
             summary.append(f"Image Layers: {', '.join(self.images.keys())}")
@@ -1257,16 +2110,81 @@ class XenData:
         return "\n".join(summary)
 
     def __repr__(self):
-        return str(self)
+        def _line(label, value):
+            return f"{label:<18} {value}"
+
+        lines = [f"XenData object: {self.name}"]
+        lines.append(_line("Folder", self.xenium_folder))
+
+        if isinstance(self.trans, LazyTranscripts):
+            trans_desc = (
+                f"`trans`: LazyTranscripts[zarr] "
+                f"({self.trans.n_transcripts:,} transcripts, {len(self.trans._gene_names):,} genes)"
+            )
+        else:
+            trans_desc = f"`trans`: DataFrame[parquet] {self.trans.shape}"
+        lines.append(_line("Transcripts", trans_desc))
+
+        if self.adata is not None:
+            lines.append(_line("Expression", f"`adata`: AnnData {self.adata.shape}"))
+
+        if self.clusters is not None and len(self.clusters.columns):
+            lines.append(_line("Clusters", f"`clusters`: DataFrame {self.clusters.shape}"))
+
+        cell_boundary_desc = "unavailable"
+        if self.cell_boundaries is not None:
+            if isinstance(self.cell_boundaries, LazyBoundaryGeoDataFrame):
+                state = "loaded" if self.cell_boundaries._data is not None else "lazy"
+                cell_boundary_desc = f"`cell_boundaries`: GeoDataFrame ({self._boundary_source}, {state})"
+            else:
+                cell_boundary_desc = f"`cell_boundaries`: GeoDataFrame {self.cell_boundaries.shape}"
+
+        nuc_boundary_desc = "unavailable"
+        if self.nucleus_boundaries is not None:
+            if isinstance(self.nucleus_boundaries, LazyBoundaryGeoDataFrame):
+                state = "loaded" if self.nucleus_boundaries._data is not None else "lazy"
+                nuc_boundary_desc = f"`nucleus_boundaries`: GeoDataFrame ({self._boundary_source}, {state})"
+            else:
+                nuc_boundary_desc = f"`nucleus_boundaries`: GeoDataFrame {self.nucleus_boundaries.shape}"
+
+        lines.append(_line("Boundaries", cell_boundary_desc))
+        lines.append(_line("", nuc_boundary_desc))
+
+        if self.images:
+            image_parts = []
+            if 'DAPI' in self.images:
+                image_parts.append("`images['DAPI']`")
+            if self.protein_images is not None:
+                n_ch = len(self.protein_images.get('channel_names', []))
+                image_parts.append(f"`protein_images` ({n_ch} channels)")
+            lines.append(_line("Images", ", ".join(image_parts)))
+
+        roi_summary = self.ROIs.summary()
+        roi_desc = (
+            f"`ROIs`: {roi_summary['n_selections']} selections, "
+            f"{roi_summary['n_classes']} classes"
+        )
+        if self.active_roi is not None:
+            roi_desc += f"; active=`{getattr(self.active_roi, 'name', 'roi')}`"
+        if self.subset_roi is not None:
+            roi_desc += f"; subset=`{getattr(self.subset_roi, 'name', 'roi')}`"
+        lines.append(_line("ROIs", roi_desc))
+
+        lines.append("Common accessors:")
+        lines.append("  `xdata.trans`, `xdata.adata`, `xdata.clusters`, `xdata.cell_boundaries`,")
+        lines.append("  `xdata.nucleus_boundaries`, `xdata.ROIs`, `xdata.images`")
+        return "\n".join(lines)
     
     def import_ROI(self,
                    roi_file,
                    roi_name: Union[str, int, list, None]=None,
                    plot_ROIs: bool = False,
-                   scale_geojson: bool = True):
+                   scale_geojson: bool = True,
+                   append: bool = True):
         """
         Import one or more ROIs from either a legacy Xenium Analyzer CSV or a GeoJSON file.
-        Imported ROIs are stored in ``self.ROIs`` with geometry, centroid, and plotting vertices.
+        Imported ROIs are stored in ``self.ROIs`` as an ``ROICollection`` that
+        preserves both flat selections and Explorer-style ROI classes.
 
         Parameters:
         - roi_file: path to a ROI CSV or GeoJSON file
@@ -1274,16 +2192,35 @@ class XenData:
           For GeoJSON, this can be a feature name, feature index, or list of either.
         - plot_ROIs: If True, plots the imported ROIs over a scatter of cell centroids.
         - scale_geojson: If True, scales GeoJSON coordinates by ``self.pixel_size``.
+        - append: If True (default), add these ROIs to the existing collection.
+          If False, replace the existing ROI collection before importing.
         """
-        roi_names = _import_roi_records(
-            roi_store=self.ROIs,
+        roi_names = self.ROIs.import_file(
             roi_file=roi_file,
             roi_name=roi_name,
             pixel_size=self.pixel_size,
             scale_geojson=scale_geojson,
+            append=append,
         )
 
-        print(f'Successfully imported {len(roi_names)} ROI(s): {", ".join(roi_names)}')
+        summary = self.ROIs.summary()
+        if summary["n_classes"]:
+            class_detail = ", ".join(
+                f"{name} ({count})" for name, count in summary["classes"].items()
+            )
+            print(
+                f"Imported {len(roi_names)} ROI selection(s). "
+                f"Collection now contains {summary['n_selections']} selection(s) "
+                f"across {summary['n_classes']} class(es): {class_detail}"
+            )
+        else:
+            print(
+                f"Imported {len(roi_names)} ROI selection(s). "
+                f"Collection now contains {summary['n_selections']} selection(s)."
+            )
+
+        if self.subset_roi is None and self.ROIs:
+            self.active_roi = self.ROIs.union
 
         ### OPTIONAL: plot the imported ROIs
         # Sample 100k cells for faster plotting
@@ -1302,13 +2239,10 @@ class XenData:
             ax.scatter(x, y, s=1, color='white', alpha=0.1)
             ax.set_facecolor('black')
 
-            for roi_name, vals in self.ROIs.items():
-                pts = vals['points']
-                poly_kwargs = vals['poly_kwargs']
-                polygon = pl.Polygon(pts, **poly_kwargs)
-                ax.add_patch(polygon)
+            for roi_name, roi in self.ROIs.items():
+                roi.plot(ax)
                 # Annotate with ROI name at centroid
-                cx, cy = vals['centroid']
+                cx, cy = roi.centroid
                 ax.text(cx, cy, 
                         roi_name, 
                         color='red', 
@@ -1322,6 +2256,8 @@ class XenData:
             ax.set_xticks([])
             ax.set_yticks([])
             pl.show()
+
+        return roi_names
 
     def import_ROI_xeniumanalyzer(self,
                                   roi_csv_file,
@@ -1339,9 +2275,10 @@ class XenData:
         )
 
 
-    def crop_to_ROI(self, ROI, selection=None, scale_geojson=True, inplace=True):
+    def subset_to_roi(self, ROI, selection=None, scale_geojson=True, inplace=True):
         """
-        Crop the data to a specified region of interest (ROI).
+        Subset the data to a specified region of interest (ROI).
+
         Parameters:
         - ROI: how to specify the ROI. Can be:
             - path to a CSV file containing ROI coordinates (see read_ROI_from_csv)
@@ -1355,46 +2292,41 @@ class XenData:
         - scale_geojson: if True, GeoJSON coordinates are scaled by ``self.pixel_size``.
           This is the default because Xenium GeoJSON annotations are commonly stored in pixels.
         - inplace: if True (default), modify this object in place and return None.
-          If False, return a new cropped XenData object, leaving this one unchanged.
+          If False, return a new subsetted XenData object, leaving this one unchanged.
         Returns:
         - None if inplace=True, or a new XenData object if inplace=False.
         """
         if not inplace:
             obj = self.copy()
-            obj.crop_to_ROI(ROI, selection=selection, scale_geojson=scale_geojson, inplace=True)
+            obj.subset_to_roi(ROI, selection=selection, scale_geojson=scale_geojson, inplace=True)
             return obj
-        from shapely import contains_xy
 
         if isinstance(ROI, str) and ROI in self.ROIs:
-            ROI = self.ROIs[ROI]['geometry']
+            roi_obj = self.ROIs.resolve(ROI)
+        else:
+            roi_obj = _coerce_roi(
+                ROI,
+                selection=selection,
+                pixel_size=self.pixel_size,
+                scale_geojson=scale_geojson,
+            )
 
-        roi_polygon = _coerce_roi_geometry(
-            ROI,
-            selection=selection,
-            pixel_size=self.pixel_size,
-            scale_geojson=scale_geojson,
-        )
+        roi_polygon = roi_obj.geometry
         
         # Apply the filter to the DataFrame
         if isinstance(self.trans, LazyTranscripts):
             # Use polygon bbox for efficient tile selection, then apply exact polygon mask
-            xmin_r, ymin_r, xmax_r, ymax_r = roi_polygon.bounds
-            df = self.trans.query(xmin=xmin_r, xmax=xmax_r, ymin=ymin_r, ymax=ymax_r)
-            ROI_filter = contains_xy(roi_polygon,
-                                     df['x_location'].values,
-                                     df['y_location'].values)
-            self.trans = df[ROI_filter].copy()
+            df = roi_obj.query_lazy_transcripts(self.trans, quality="all")
+            self.trans = roi_obj.crop_dataframe(df).copy()
             # Filter adata spatially by cell centroid so update_cell_names
             # (called below) reads the already-subsetted obs_names
             if self.adata is not None and 'x_centroid' in self.adata.obs.columns:
                 cx = self.adata.obs['x_centroid'].values
                 cy = self.adata.obs['y_centroid'].values
-                in_roi = contains_xy(roi_polygon, cx, cy)
+                in_roi = roi_obj.contains_points(cx, cy)
                 self.adata = self.adata[in_roi, :].copy()
         else:
-            points = self.trans[['x_location', 'y_location']].values
-            ROI_filter = contains_xy(roi_polygon, points[:, 0], points[:, 1])
-            self.trans = self.trans[ROI_filter].copy()
+            self.trans = roi_obj.crop_dataframe(self.trans).copy()
 
         # Filter celldata
         self.update_cell_names()
@@ -1408,7 +2340,7 @@ class XenData:
             else:
                 cx = self.cell_boundaries.geometry.centroid.x
                 cy = self.cell_boundaries.geometry.centroid.y
-                in_roi = contains_xy(roi_polygon, cx.values, cy.values)
+                in_roi = roi_obj.contains_points(cx.values, cy.values)
                 self.cell_boundaries = self.cell_boundaries[in_roi]
 
         if self.nucleus_boundaries is not None:
@@ -1418,7 +2350,7 @@ class XenData:
             else:
                 cx = self.nucleus_boundaries.geometry.centroid.x
                 cy = self.nucleus_boundaries.geometry.centroid.y
-                in_roi = contains_xy(roi_polygon, cx.values, cy.values)
+                in_roi = roi_obj.contains_points(cx.values, cy.values)
                 self.nucleus_boundaries = self.nucleus_boundaries[in_roi]
 
         if self.clusters is not None and len(self.clusters):
@@ -1430,11 +2362,62 @@ class XenData:
             self.adata = self.adata[keep_cells, :].copy()
 
         self.area = roi_polygon.area
-        self.active_roi = roi_polygon
+        self.subset_roi = roi_obj
+        self.active_roi = roi_obj
+
+    def crop_to_ROI(self, ROI, selection=None, scale_geojson=True, inplace=True):
+        """
+        Backward-compatible alias for ``subset_to_roi``.
+        """
+        return self.subset_to_roi(
+            ROI,
+            selection=selection,
+            scale_geojson=scale_geojson,
+            inplace=inplace,
+        )
         
     def copy(self):
         import copy
         return copy.deepcopy(self)
+
+    def set_active_roi(self, selector):
+        """
+        Set the default plotting ROI without cropping the underlying data.
+
+        ``selector`` may be an ROI object, ROI class, selection/class name, or
+        integer selection index.
+        """
+        self.active_roi = self.ROIs.resolve(selector)
+        return self.active_roi
+
+    def clear_active_roi(self):
+        """
+        Clear the active plotting ROI. If the dataset was actually subsetted,
+        fall back to the subset ROI instead of exposing out-of-scope extents.
+        """
+        self.active_roi = self.subset_roi
+
+    @property
+    def subset_roi(self):
+        """
+        ROI used to materially subset this object, if any.
+        """
+        return self._subset_roi
+
+    @subset_roi.setter
+    def subset_roi(self, value):
+        self._subset_roi = value
+
+    @property
+    def cropped_roi(self):
+        """
+        Backward-compatible alias for ``subset_roi``.
+        """
+        return self._subset_roi
+
+    @cropped_roi.setter
+    def cropped_roi(self, value):
+        self._subset_roi = value
 
     def write_xenium_explorer(
         self,
@@ -1628,11 +2611,11 @@ class XenData:
 
         Notes:
         - ``matrix_format='mex'`` is currently supported.
-        - If an active ROI is present and ``crop_morphology=True``, the morphology OME-TIFF
-          is cropped to the ROI bounding box in pixel coordinates.
-        - Cropped morphology exports are written as pyramidal OME-TIFFs by default.
+        - If this object has been subsetted and ``crop_morphology=True``, the
+          morphology OME-TIFF is subset to the ROI bounding box in pixel coordinates.
+        - Subsetted morphology exports are written as pyramidal OME-TIFFs by default.
         - Detected linked protein images in ``morphology_focus`` can also be exported.
-        - Spatial tables are rebased to the cropped image origin by default.
+        - Spatial tables are rebased to the subset image origin by default.
         """
         from pathlib import Path
 
@@ -1831,7 +2814,8 @@ class XenData:
             if micron_coords is None:
                 micron_coords = True
         else:
-            roi = getattr(self, 'active_roi', None)
+            roi_obj = getattr(self, 'active_roi', None)
+            roi = None if roi_obj is None else roi_obj.geometry
             if micron_coords is None:
                 # XenData spatial overlays (boundaries, splats, ROIs) are all in
                 # micron coordinates, so default to the same frame even for the
@@ -1978,7 +2962,7 @@ class XenData:
                 bounds = _pixel_aligned_bounds_um(bounds, self.pixel_size)
             splat_kwargs['bounds'] = bounds
         else:
-            if hasattr(self, 'active_roi'):
+            if getattr(self, 'active_roi', None) is not None:
                 roi_bounds = _roi_bounds_um(self.active_roi)
                 bounds = _pixel_aligned_bounds_um(roi_bounds, self.pixel_size)
             elif image_channel is not None:
@@ -2096,11 +3080,11 @@ class XenData:
         if gdf is None or len(gdf) == 0:
             raise ValueError(
                 f"No {kind} boundaries loaded. "
-                "Check that the parquet file was present on init."
+                "Check that boundary parquet files or cells.zarr.zip were available on init."
             )
 
         # ── spatial subset ────────────────────────────────────────────────────
-        if bounds is None and hasattr(self, 'active_roi'):
+        if bounds is None and getattr(self, 'active_roi', None) is not None:
             xmin, xmax, ymin, ymax = _roi_bounds_um(self.active_roi)
         elif bounds is not None:
             xmin, xmax, ymin, ymax = bounds
@@ -2267,71 +3251,134 @@ class XenData:
         from scipy.sparse import coo_matrix
         print(f'Creating binned AnnData object with bin size of {bin_size}um...')
 
-        df = self.trans
+        include_features = _normalize_feature_selection(
+            include_features,
+            self.features,
+            arg_name="include_features",
+        )
 
-        # filter transcript-level data to only include selected features
-        if include_features is None:
-            include_features = self.features
-        elif isinstance(include_features, str):
-            include_features = [include_features]
-        assert all([f in self.features for f in include_features]), "Some features in include_features are not present in the dataset."
-        
-        df[df['feature_name'].isin(include_features)]
+        if isinstance(self.trans, LazyTranscripts):
+            bounds = None if self.subset_roi is None else self.subset_roi.bounds
+            parquet_path = os.path.join(self.xenium_folder, "transcripts.parquet")
+            need_metadata = exclude_unassigned or (distance_to_nucleus is not None)
+
+            use_parquet = False
+            parquet_columns = ["x_location", "y_location", "feature_name"]
+            if exclude_unassigned:
+                parquet_columns.append("cell_id")
+            if distance_to_nucleus is not None:
+                parquet_columns.append("nucleus_distance")
+
+            if need_metadata and os.path.exists(parquet_path):
+                try:
+                    import pyarrow.parquet as pq
+                    schema_names = set(pq.ParquetFile(parquet_path).schema.names)
+                    use_parquet = set(parquet_columns).issubset(schema_names)
+                except Exception:
+                    use_parquet = False
+
+            if use_parquet:
+                print("Using transcripts.parquet to preserve transcript metadata filters...")
+                df = pd.read_parquet(parquet_path, columns=parquet_columns)
+                if bounds is not None:
+                    df = df[
+                        (df["x_location"] >= bounds[0]) &
+                        (df["x_location"] <= bounds[1]) &
+                        (df["y_location"] >= bounds[2]) &
+                        (df["y_location"] <= bounds[3])
+                    ].copy()
+            else:
+                if need_metadata:
+                    print("Transcript metadata are unavailable in the lazy Zarr view; proceeding without them.")
+                df = self.trans.query(
+                    genes=include_features,
+                    quality='all',
+                    **(
+                        {}
+                        if bounds is None
+                        else dict(
+                            xmin=bounds[0],
+                            xmax=bounds[1],
+                            ymin=bounds[2],
+                            ymax=bounds[3],
+                        )
+                    ),
+                )
+        else:
+            df = self.trans.copy()
+
+        df = df[df['feature_name'].isin(include_features)].copy()
 
         if exclude_unassigned:
-            print('Using only transcripts assigned to cells/nuclei...')
-            df = df[df['cell_id'] != 'UNASSIGNED'].copy()
-        
-        if distance_to_nucleus is not None:
-            print(f'Excluding transcripts further than {distance_to_nucleus}um from the nucleus...')
-            # Filter out transcripts that are further than distance_to_nucleus from the nucleus
-            df = df[df['nucleus_distance'] <= distance_to_nucleus].copy()
+            if 'cell_id' in df.columns:
+                print('Using only transcripts assigned to cells/nuclei...')
+                df = df[df['cell_id'] != 'UNASSIGNED'].copy()
+            else:
+                print("Transcript cell assignments are unavailable; skipping exclude_unassigned filter.")
 
-        # Determine the bin indices
-        df['x_bin'] = (df['x_location'] // bin_size).astype(int)
-        df['y_bin'] = (df['y_location'] // bin_size).astype(int)
-        
-        # Create unique bin identifiers
-        df['bin_id'] = list(zip(df['x_bin'], df['y_bin']))
-        
-        # Pivot table to create sparse matrix
-        bin_groups = df.groupby(['bin_id', 'feature_name']).size().reset_index(name='count')
-        
-        # Convert bin coordinates to a categorical index
-        bin_index = {bid: i for i, bid in enumerate(bin_groups['bin_id'].unique())}
-        gene_index = {gene: i for i, gene in enumerate(bin_groups['feature_name'].unique())}
-        
-        # Map to indices
-        row = bin_groups['bin_id'].map(bin_index)
-        col = bin_groups['feature_name'].map(gene_index)
-        data = bin_groups['count'].values
-        
-        # Create sparse matrix
-        expression_matrix = coo_matrix((data, (row, col)), 
-            shape=(len(bin_index), len(gene_index)))
-        
-        # Convert bin_index back to spatial coordinates
-        bin_coords = np.array(list(bin_index.keys()))
-        ymid = (bin_coords[:,1].max() - bin_coords[:,1].min())/2
-        bin_coords[:,1] = -(bin_coords[:,1] - ymid).astype('int')
-        # Create AnnData object
+        if distance_to_nucleus is not None:
+            if 'nucleus_distance' in df.columns:
+                print(f'Excluding transcripts further than {distance_to_nucleus}um from the nucleus...')
+                df = df[df['nucleus_distance'] <= distance_to_nucleus].copy()
+            else:
+                print("Transcript nucleus distances are unavailable; skipping distance_to_nucleus filter.")
+
+        binned = _bin_transcript_dataframe(df, bin_size=bin_size, feature_names=include_features)
+
+        expression_matrix = coo_matrix(
+            (binned["counts"], (binned["bin_rows"], binned["feature_indices"])),
+            shape=(len(binned["occupied_x_bins"]), len(binned["feature_names"])),
+        )
+
         adata = ad.AnnData(X=expression_matrix.tocsr())
-        
-        # Store metadata
-        adata.obs_names = [f'bin_{i}' for i in range(len(bin_index))]
-        adata.var_names = list(gene_index.keys())
+        adata.obs_names = [f'bin_{i}' for i in range(adata.n_obs)]
+        adata.var_names = list(binned["feature_names"])
+
+        if adata.n_obs:
+            x_bins = binned["occupied_x_bins"].astype(int)
+            y_bins = binned["occupied_y_bins"].astype(int)
+            ymid = (y_bins.max() - y_bins.min()) / 2.0
+            y_bins_plot = -(y_bins - ymid).astype(int)
+            bin_coords = np.column_stack([x_bins, y_bins_plot])
+            spatial_um = np.column_stack([
+                (x_bins + 0.5) * float(bin_size),
+                (y_bins + 0.5) * float(bin_size),
+            ])
+        else:
+            bin_coords = np.zeros((0, 2), dtype=int)
+            spatial_um = np.zeros((0, 2), dtype=float)
+
         adata.obs[['x_bin', 'y_bin']] = bin_coords
         adata.obsm['spatial'] = bin_coords
-        
-        # Save the new binned AnnData object to the xdata object
+        adata.obsm['spatial_um'] = spatial_um
+
         self.binned_adata = adata
-        self.binned_adata.uns['bin_size'] = bin_size
+        self.binned_adata.uns['bin_size'] = float(bin_size)
         self.binned_adata.uns['pixel_size'] = self.pixel_size
-        self.binned_adata.uns['bin_edges'] = np.arange(df['x_location'].min(), df['x_location'].max() + bin_size, bin_size)
-        self.binned_adata.uns['bin_edges'] = np.arange(df['y_location'].min(), df['y_location'].max() + bin_size, bin_size)
+        self.binned_adata.uns['x_bin_edges'] = (
+            np.array([], dtype=float)
+            if not len(binned["x_bin_values"])
+            else np.arange(
+                binned["x_bin_values"][0] * bin_size,
+                (binned["x_bin_values"][-1] + 1) * bin_size + bin_size,
+                bin_size,
+                dtype=float,
+            )
+        )
+        self.binned_adata.uns['y_bin_edges'] = (
+            np.array([], dtype=float)
+            if not len(binned["y_bin_values"])
+            else np.arange(
+                binned["y_bin_values"][0] * bin_size,
+                (binned["y_bin_values"][-1] + 1) * bin_size + bin_size,
+                bin_size,
+                dtype=float,
+            )
+        )
 
     def assign_cells_to_ROIs(self,
                               method: Literal['centroid', 'majority'] = 'centroid',
+                              level: Literal['selection', 'class'] = 'selection',
                               key_added: str = 'roi',
                               min_overlap: float = 0.0):
         """
@@ -2351,6 +3398,9 @@ class XenData:
             'majority' (slower) — uses the full cell boundary polygon.  Each
             cell is assigned to the ROI that covers the largest fraction of its
             area.  Requires ``self.cell_boundaries`` to be loaded.
+        level : 'selection' | 'class'
+            Whether to assign by individual ROI selections (default) or by the
+            union of all selections within each ROI class.
         key_added : str
             Column name written to ``self.adata.obs``. Default ``'roi'``.
         min_overlap : float
@@ -2365,26 +3415,31 @@ class XenData:
         if not self.ROIs:
             raise ValueError("No ROIs defined. Call import_ROI() first.")
 
-        from shapely import contains_xy
+        if level == 'selection':
+            roi_items = list(self.ROIs.items())
+        elif level == 'class':
+            roi_items = [(name, roi_class.union) for name, roi_class in self.ROIs.classes.items()]
+        else:
+            raise ValueError("level must be 'selection' or 'class'.")
 
-        roi_names = list(self.ROIs.keys())
+        roi_names = [name for name, _ in roi_items]
         labels = pd.Series(np.nan, index=self.adata.obs_names, dtype=object)
 
         if method == 'centroid':
             coords = self.adata.obsm['spatial']  # (n_cells, 2), microns
-            for roi_name, roi_data in self.ROIs.items():
-                mask = contains_xy(roi_data['geometry'], coords[:, 0], coords[:, 1])
+            for roi_name, roi_data in roi_items:
+                mask = roi_data.contains_points(coords[:, 0], coords[:, 1])
                 labels.iloc[mask] = roi_name
 
         elif method == 'majority':
             if self.cell_boundaries is None:
                 raise ValueError(
                     "Cell boundaries are required for method='majority'. "
-                    "Ensure cell_boundaries.parquet was loaded."
+                    "Ensure cell boundaries were loaded from parquet or cells.zarr.zip."
                 )
             from shapely.strtree import STRtree
 
-            roi_geoms  = [self.ROIs[n]['geometry'] for n in roi_names]
+            roi_geoms  = [roi.geometry for _, roi in roi_items]
             tree = STRtree(roi_geoms)
 
             for cell_id, row in self.cell_boundaries.iterrows():
@@ -2400,7 +3455,7 @@ class XenData:
                     try:
                         frac = cell_geom.intersection(roi_geoms[idx]).area / cell_area
                     except Exception:
-                        continue
+                            continue
                     if frac > best_frac:
                         best_frac, best_roi = frac, roi_names[idx]
 
@@ -2419,6 +3474,7 @@ class XenData:
         print(f"Assigned {total:,}/{self.adata.n_obs:,} cells  [{detail}]")
 
     def assign_bins_to_ROIs(self,
+                             level: Literal['selection', 'class'] = 'selection',
                              key_added: str = 'roi'):
         """
         Assign each spatial bin in ``self.binned_adata`` to a named ROI from
@@ -2429,6 +3485,9 @@ class XenData:
 
         Parameters
         ----------
+        level : 'selection' | 'class'
+            Whether to assign by individual ROI selections (default) or by the
+            union of all selections within each ROI class.
         key_added : str
             Column name written to ``self.binned_adata.obs``. Default ``'roi'``.
 
@@ -2442,8 +3501,6 @@ class XenData:
             )
         if not self.ROIs:
             raise ValueError("No ROIs defined. Call import_ROI() first.")
-
-        from shapely import contains_xy
 
         bin_size = self.binned_adata.uns['bin_size']
         x_stored = self.binned_adata.obs['x_bin'].values.astype(float)
@@ -2459,11 +3516,18 @@ class XenData:
         x_um = (x_stored + 0.5) * bin_size
         y_um = (y_orig   + 0.5) * bin_size
 
-        roi_names = list(self.ROIs.keys())
+        if level == 'selection':
+            roi_items = list(self.ROIs.items())
+        elif level == 'class':
+            roi_items = [(name, roi_class.union) for name, roi_class in self.ROIs.classes.items()]
+        else:
+            raise ValueError("level must be 'selection' or 'class'.")
+
+        roi_names = [name for name, _ in roi_items]
         labels = pd.Series(np.nan, index=self.binned_adata.obs_names, dtype=object)
 
-        for roi_name, roi_data in self.ROIs.items():
-            mask = contains_xy(roi_data['geometry'], x_um, y_um)
+        for roi_name, roi_data in roi_items:
+            mask = roi_data.contains_points(x_um, y_um)
             labels.iloc[mask] = roi_name
 
         self.binned_adata.obs[key_added] = pd.Categorical(labels)
@@ -2706,33 +3770,57 @@ def read_ROI_from_geojson(geojson_path, feature=None, return_gdf=False, scale_fa
         return roi_geometry, area_um2, rois
     return roi_geometry, area_um2
 
-def _coerce_roi_geometry(ROI, selection=None, pixel_size=1.0, scale_geojson=True):
+def _coerce_roi_geometry(roi_like, selection=None, pixel_size=1.0, scale_geojson=True):
     from shapely.geometry import Polygon
 
-    if hasattr(ROI, "geom_type"):
-        return ROI
+    if isinstance(roi_like, ROI):
+        return roi_like.geometry
+    if isinstance(roi_like, ROIClass):
+        return roi_like.union.geometry
 
-    if isinstance(ROI, str):
-        if not os.path.exists(ROI):
-            raise FileNotFoundError(f"ROI file not found: {ROI}")
-        if ROI.lower().endswith((".geojson", ".json")):
+    if hasattr(roi_like, "geom_type"):
+        return roi_like
+
+    if isinstance(roi_like, str):
+        if not os.path.exists(roi_like):
+            raise FileNotFoundError(f"ROI file not found: {roi_like}")
+        if roi_like.lower().endswith((".geojson", ".json")):
             scale_factor = pixel_size if scale_geojson else 1.0
-            roi_geometry, _ = read_ROI_from_geojson(ROI, feature=selection, scale_factor=scale_factor)
+            roi_geometry, _ = read_ROI_from_geojson(roi_like, feature=selection, scale_factor=scale_factor)
             return roi_geometry
-        ROI, _ = read_ROI_from_csv(ROI, selection=selection)
+        roi_like, _ = read_ROI_from_csv(roi_like, selection=selection)
 
-    if isinstance(ROI, np.ndarray):
-        if ROI.ndim != 2 or ROI.shape[1] != 2:
+    if isinstance(roi_like, np.ndarray):
+        if roi_like.ndim != 2 or roi_like.shape[1] != 2:
             raise ValueError("ROI must be a 2D numpy array with shape (n, 2).")
-        return Polygon(ROI)
+        return Polygon(roi_like)
 
-    if isinstance(ROI, pd.DataFrame):
-        if ROI.shape[1] != 2:
+    if isinstance(roi_like, pd.DataFrame):
+        if roi_like.shape[1] != 2:
             raise ValueError("ROI must be a DataFrame with 2 columns.")
-        return Polygon(ROI.values)
+        return Polygon(roi_like.values)
 
     raise TypeError(
         "ROI must be a shapely geometry, a path to a ROI file, a 2D numpy array, or a 2-column DataFrame."
+    )
+
+
+def _coerce_roi(roi_like, selection=None, pixel_size=1.0, scale_geojson=True, name=None, source=None, poly_kwargs=None):
+    if isinstance(roi_like, ROI):
+        return roi_like
+    if isinstance(roi_like, ROIClass):
+        return roi_like.union
+    geometry = _coerce_roi_geometry(
+        roi_like,
+        selection=selection,
+        pixel_size=pixel_size,
+        scale_geojson=scale_geojson,
+    )
+    return ROI.from_geometry(
+        geometry,
+        name=name,
+        source=source,
+        poly_kwargs=poly_kwargs,
     )
 
 def _geometry_to_roi_points(geometry):
@@ -2743,19 +3831,83 @@ def _geometry_to_roi_points(geometry):
         return np.asarray(largest.exterior.coords)
     raise TypeError(f"Unsupported ROI geometry type: {geometry.geom_type}")
 
-def _register_roi_record(roi_store, name, geometry, poly_kwargs=None, source=None, area_um2=None):
-    if poly_kwargs is None:
-        poly_kwargs = dict(closed=True, fill=False, edgecolor='yellow', linewidth=1)
+def _normalize_roi_property(value):
+    if isinstance(value, dict):
+        for key in ("name", "label", "class", "classification", "value", "title"):
+            if key in value and value[key] not in (None, ""):
+                return str(value[key])
+        return None
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return _normalize_roi_property(value[0])
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
 
-    centroid = geometry.centroid
-    roi_store[str(name)] = {
-        'centroid': (centroid.x, centroid.y),
-        'points': _geometry_to_roi_points(geometry),
-        'geometry': geometry,
-        'poly_kwargs': poly_kwargs,
-        'source': source,
-        'area_um2': geometry.area if area_um2 is None else area_um2,
-    }
+
+def _geojson_class_name(row):
+    for key in (
+        "class_name",
+        "class",
+        "classification",
+        "annotation_class",
+        "region_class",
+        "group",
+        "object_type",
+        "type",
+    ):
+        if key in row.index:
+            value = _normalize_roi_property(row.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _geojson_selection_name(row, idx):
+    for key in (
+        "selection_name",
+        "selection",
+        "name",
+        "label",
+        "region_name",
+        "annotation_name",
+    ):
+        if key in row.index:
+            value = _normalize_roi_property(row.get(key))
+            if value is not None:
+                return value
+    return f"selection_{idx}"
+
+
+def _make_roi_name(class_name, selection_name, idx):
+    if class_name and selection_name:
+        return f"{class_name}:{selection_name}"
+    if selection_name:
+        return selection_name
+    if class_name:
+        return f"{class_name}_{idx}"
+    return f"selection_{idx}"
+
+
+def _register_roi_record(roi_store, name, geometry, selection_name=None, class_name=None, poly_kwargs=None, source=None, area_um2=None, metadata=None):
+    roi = ROI.from_geometry(
+        geometry,
+        name=str(name),
+        selection_name=selection_name,
+        class_name=class_name,
+        poly_kwargs=poly_kwargs,
+        source=source,
+        metadata={
+            "area_um2": geometry.area if area_um2 is None else area_um2,
+            **({} if metadata is None else metadata),
+        },
+    )
+    if isinstance(roi_store, ROICollection):
+        roi_store.add(roi)
+    else:
+        roi_store[str(name)] = roi
 
 def _select_geojson_features(rois, roi_name=None):
     if roi_name is None:
@@ -2795,6 +3947,23 @@ def _select_geojson_features(rois, roi_name=None):
 
     return selected
 
+
+def _match_geojson_row(row, selector):
+    if selector is None:
+        return True
+    if isinstance(selector, int):
+        return False
+    selector = str(selector)
+    candidates = {
+        _normalize_roi_property(row.get("name")) if "name" in row.index else None,
+        _normalize_roi_property(row.get("selection_name")) if "selection_name" in row.index else None,
+        _normalize_roi_property(row.get("selection")) if "selection" in row.index else None,
+        _geojson_selection_name(row, 0),
+        _geojson_class_name(row),
+    }
+    candidates = {c for c in candidates if c}
+    return selector in candidates
+
 def _import_roi_records(roi_store, roi_file, roi_name=None, pixel_size=1.0, scale_geojson=True):
     roi_path = os.fspath(roi_file)
 
@@ -2802,14 +3971,43 @@ def _import_roi_records(roi_store, roi_file, roi_name=None, pixel_size=1.0, scal
         scale_factor = pixel_size if scale_geojson else 1.0
         _, _, rois = read_ROI_from_geojson(roi_path, return_gdf=True, scale_factor=scale_factor)
         imported_names = []
-        for name, geometry in _select_geojson_features(rois, roi_name=roi_name):
+        selectors = roi_name if isinstance(roi_name, list) else ([roi_name] if roi_name is not None else None)
+        class_counts = {}
+        for idx, row in rois.iterrows():
+            if selectors is not None:
+                matched = False
+                for selector in selectors:
+                    if isinstance(selector, int) and selector == idx:
+                        matched = True
+                        break
+                    if _match_geojson_row(row, selector):
+                        matched = True
+                        break
+                if not matched:
+                    continue
+
+            class_name = _geojson_class_name(row)
+            selection_name = _geojson_selection_name(row, idx)
+            if class_name:
+                class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                if selection_name == f"selection_{idx}":
+                    selection_name = f"{class_name}_{class_counts[class_name]:03d}"
+            roi_name_full = _make_roi_name(class_name, selection_name, idx)
+            metadata = {
+                col: row[col]
+                for col in rois.columns
+                if col != "geometry" and row[col] is not None
+            }
             _register_roi_record(
                 roi_store,
-                name=name,
-                geometry=geometry,
+                name=roi_name_full,
+                geometry=row.geometry,
+                selection_name=selection_name,
+                class_name=class_name,
                 source=roi_path,
+                metadata=metadata,
             )
-            imported_names.append(name)
+            imported_names.append(roi_name_full)
         return imported_names
 
     polydf = pd.read_csv(roi_path, comment='#')
@@ -2840,6 +4038,7 @@ def _import_roi_records(roi_store, roi_file, roi_name=None, pixel_size=1.0, scal
             roi_store,
             name=name,
             geometry=geometry,
+            selection_name=name,
             source=roi_path,
         )
 
@@ -2851,10 +4050,53 @@ def _read_xenium_table_if_present(xenium_folder, filename):
         return pd.read_parquet(path)
     return None
 
+
+def _resolve_roi_selection_selector(roi_collection, imported_names, selector):
+    """
+    Resolve an init-time crop selector against an imported ROI collection.
+
+    Accepted selectors
+    ------------------
+    None / False:
+        no cropping
+    True:
+        crop to the only imported selection; error if the file contains more than one
+    int:
+        crop to the Nth imported selection (0-based)
+    str:
+        crop by selection name, combined flat ROI name, or class name
+    """
+    if selector is None or selector is False:
+        return None
+
+    if selector is True:
+        if len(imported_names) != 1:
+            raise ValueError(
+                "crop_to_selection=True requires the ROI file to contain exactly one "
+                f"imported selection; found {len(imported_names)}."
+            )
+        return imported_names[0]
+
+    if isinstance(selector, int):
+        if selector < 0 or selector >= len(imported_names):
+            raise IndexError(
+                f"crop_to_selection index {selector} is out of bounds for "
+                f"{len(imported_names)} imported selection(s)."
+            )
+        return imported_names[selector]
+
+    if isinstance(selector, str):
+        # Let downstream ROICollection / subset_to_roi resolve class names,
+        # flat combined names, or explicit selection names.
+        return selector
+
+    return selector
+
 def _export_crop_origin_um(xdata):
-    if not hasattr(xdata, "active_roi"):
+    subset_roi = getattr(xdata, "subset_roi", None)
+    if subset_roi is None:
         return 0.0, 0.0
-    minx, miny, _, _ = xdata.active_roi.bounds
+    minx, _, miny, _ = _roi_bounds_um(subset_roi)
     x0_px = max(0, int(np.floor(minx / xdata.pixel_size)))
     y0_px = max(0, int(np.floor(miny / xdata.pixel_size)))
     return x0_px * xdata.pixel_size, y0_px * xdata.pixel_size
@@ -3035,7 +4277,7 @@ def _write_10x_mex(adata, output_dir):
     spio.mmwrite(str(output_dir / "matrix.mtx"), matrix)
 
 def _roi_bounds_in_pixels(roi_geometry, pixel_size, image_shape):
-    minx, miny, maxx, maxy = roi_geometry.bounds
+    minx, miny, maxx, maxy = _shapely_bounds(roi_geometry)
     x0 = max(0, int(np.floor(minx / pixel_size)))
     y0 = max(0, int(np.floor(miny / pixel_size)))
     x1 = min(int(image_shape[-1]), int(np.ceil(maxx / pixel_size)))
@@ -3057,8 +4299,17 @@ def _pixel_aligned_bounds_um(bounds, pixel_size):
 
 def _roi_bounds_um(roi_geometry):
     """Return ROI bounds in the plotting convention (xmin, xmax, ymin, ymax)."""
-    minx, miny, maxx, maxy = map(float, roi_geometry.bounds)
+    if isinstance(roi_geometry, ROI):
+        return roi_geometry.bounds
+    minx, miny, maxx, maxy = _shapely_bounds(roi_geometry)
     return (minx, maxx, miny, maxy)
+
+
+def _shapely_bounds(roi_geometry):
+    """Return shapely-order bounds (minx, miny, maxx, maxy) for ROI-like inputs."""
+    if isinstance(roi_geometry, ROI):
+        return roi_geometry.shapely_bounds
+    return tuple(map(float, roi_geometry.bounds))
 
 
 def _image_extent_um(image_path, pixel_size):
@@ -3390,7 +4641,8 @@ def _write_morphology_for_slice(xdata,
     if not os.path.exists(morphology_path):
         raise FileNotFoundError(f"Morphology image not found: {morphology_path}")
 
-    if not crop or not hasattr(xdata, "active_roi"):
+    subset_roi = getattr(xdata, "subset_roi", None)
+    if not crop or subset_roi is None:
         shutil.copy2(morphology_path, output_path)
         return
 
@@ -3399,7 +4651,7 @@ def _write_morphology_for_slice(xdata,
         series = tif.series[0]
         level_arrays, zarr_store = _source_series_level_arrays(series)
         try:
-            base_bounds = _roi_bounds_in_pixels(xdata.active_roi, xdata.pixel_size, level_arrays[0].shape)
+            base_bounds = _roi_bounds_in_pixels(subset_roi, xdata.pixel_size, level_arrays[0].shape)
             if pyramidal:
                 _write_pyramidal_ome_tiff_from_levels(
                     level_arrays,
@@ -3439,7 +4691,8 @@ def _write_protein_images_for_slice(xdata,
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not crop or not hasattr(xdata, "active_roi"):
+    subset_roi = getattr(xdata, "subset_roi", None)
+    if not crop or subset_roi is None:
         for src, name in zip(protein_info["files"], protein_info["filenames"]):
             shutil.copy2(src, output_dir / name)
         return
@@ -3455,7 +4708,7 @@ def _write_protein_images_for_slice(xdata,
                     levels.append(zarr.open(subpage.aszarr(), mode="r"))
             level_arrays_by_channel.append(levels)
             if base_bounds is None:
-                base_bounds = _roi_bounds_in_pixels(xdata.active_roi, xdata.pixel_size, levels[0].shape)
+                base_bounds = _roi_bounds_in_pixels(subset_roi, xdata.pixel_size, levels[0].shape)
 
     _write_linked_pyramidal_ome_tiffs_from_levels(
         level_arrays_by_channel,
@@ -4183,8 +5436,30 @@ def show_ome_tiff(image_path,
     display_px = max(int(figsize[0] * dpi), int(figsize[1] * dpi))
 
     with tifffile.TiffFile(image_path) as tif:
-        series = tif.series[0]
-        level_arrays, zarr_store = _source_series_level_arrays(series)
+        page0 = tif.pages[0]
+        subifd_pages = list(page0.pages)
+        try:
+            series = tif.series[0]
+            level_arrays, zarr_store = _source_series_level_arrays(series)
+            use_zarr_levels = True
+        except Exception as exc:
+            message = str(exc)
+            if "multi-file pyramids" not in message:
+                raise
+            use_zarr_levels = False
+            zarr_store = None
+            level_arrays = [page0] + subifd_pages
+
+        # Some multi-file OME-TIFFs silently expose only level 0 via the OME/zarr
+        # path even though TIFF SubIFDs are present. Prefer the SubIFD pyramid in
+        # that case so explicit level requests can still work.
+        if use_zarr_levels and len(level_arrays) == 1 and len(subifd_pages) > 0:
+            if zarr_store is not None:
+                zarr_store.close()
+                zarr_store = None
+            use_zarr_levels = False
+            level_arrays = [page0] + subifd_pages
+
         try:
             full_shape = level_arrays[0].shape
 
@@ -4212,30 +5487,50 @@ def show_ome_tiff(image_path,
             level_shape = level_array.shape
 
             if verbose:
+                mode = "zarr" if use_zarr_levels else "tiff-subifd"
                 print(
                     f"[show_ome_tiff] pyramid level {best_level}/{len(level_arrays)-1}  "
-                    f"({level_shape[-2]} × {level_shape[-1]} px)"
+                    f"({level_shape[-2]} × {level_shape[-1]} px) [{mode}]"
                 )
 
             if base_bounds is not None:
                 lx0, lx1, ly0, ly1 = _scale_bounds_for_level(base_bounds, best_level)
                 ly0 = max(0, ly0);  ly1 = min(level_shape[-2], ly1)
                 lx0 = max(0, lx0);  lx1 = min(level_shape[-1], lx1)
-                if level_array.ndim == 2:
-                    img = np.asarray(level_array[ly0:ly1, lx0:lx1])
-                elif z_index is None:
-                    img = np.asarray(level_array[:, ly0:ly1, lx0:lx1]).max(axis=0)
+                if use_zarr_levels:
+                    if level_array.ndim == 2:
+                        img = np.asarray(level_array[ly0:ly1, lx0:lx1])
+                    elif z_index is None:
+                        img = np.asarray(level_array[:, ly0:ly1, lx0:lx1]).max(axis=0)
+                    else:
+                        img = np.asarray(level_array[z_index, ly0:ly1, lx0:lx1])
                 else:
-                    img = np.asarray(level_array[z_index, ly0:ly1, lx0:lx1])
+                    arr = level_array.asarray()
+                    if arr.ndim == 2:
+                        img = np.asarray(arr[ly0:ly1, lx0:lx1])
+                    elif z_index is None:
+                        img = np.asarray(arr[:, ly0:ly1, lx0:lx1]).max(axis=0)
+                    else:
+                        img = np.asarray(arr[z_index, ly0:ly1, lx0:lx1])
             else:
-                if level_array.ndim == 2:
-                    img = np.asarray(level_array)
-                elif z_index is None:
-                    img = np.asarray(level_array).max(axis=0)
+                if use_zarr_levels:
+                    if level_array.ndim == 2:
+                        img = np.asarray(level_array)
+                    elif z_index is None:
+                        img = np.asarray(level_array).max(axis=0)
+                    else:
+                        img = np.asarray(level_array[z_index])
                 else:
-                    img = np.asarray(level_array[z_index])
+                    arr = level_array.asarray()
+                    if arr.ndim == 2:
+                        img = np.asarray(arr)
+                    elif z_index is None:
+                        img = np.asarray(arr).max(axis=0)
+                    else:
+                        img = np.asarray(arr[z_index])
         finally:
-            zarr_store.close()
+            if zarr_store is not None:
+                zarr_store.close()
 
     if vmin is None:
         vmin = 0

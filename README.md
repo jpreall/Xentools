@@ -41,14 +41,31 @@ xd = xentools.XenData("/path/to/xenium_or_atera_output")
 rgb, disp, ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
 ```
 
-Load and crop to a GeoJSON ROI at initialization:
+Load and subset to a GeoJSON ROI at initialization:
 
 ```python
 xd = xentools.XenData(
     "/path/to/xe_outs",
-    geojson_path="/path/to/roi.geojson",
-    roi_feature=0,
+    roi_file="/path/to/roi.geojson",
+    crop_to_selection=0,
 )
+```
+
+Track ROIs without subsetting, then focus plots through the active ROI:
+
+```python
+xd = xentools.XenData(
+    "/path/to/xe_outs",
+    roi_file="/path/to/roi.geojson",
+)
+xd.set_active_roi(0)
+rgb, disp, ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
+```
+
+Create a real subset only when you want a reduced object:
+
+```python
+xsub = xd.subset_to_roi(0, inplace=False)
 ```
 
 Overlay boundaries on DAPI:
@@ -60,7 +77,7 @@ xd.plot_boundaries(kind="cell", color_by="Cluster", ax=ax)
 
 ## Notes
 
-- ROI GeoJSON files are commonly interpreted in pixel units and scaled internally by the dataset pixel size.
+- ROI files are commonly interpreted in pixel units and scaled internally by the dataset pixel size.
 - Large Atera datasets can be loaded lazily through `transcripts.zarr.zip`; transcript access is tile-based rather than fully materialized by default.
 - The repository currently contains internal code paths for Explorer export, but the public status of that feature should be considered pending.
 
