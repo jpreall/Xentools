@@ -95,10 +95,10 @@ This keeps modules testable and reusable.
 
 ### Checklist
 
-- [ ] Create a real package layout if not already present
-- [ ] Decide whether `xentools.py` remains the compatibility entrypoint or becomes thin and imports from package modules
-- [ ] Add a simple smoke test plan for import stability
-- [ ] Identify any currently user-facing imports that must remain stable
+- [x] Create a real package layout if not already present
+- [x] Decide whether `xentools.py` remains the compatibility entrypoint or becomes thin and imports from package modules
+- [x] Add a simple smoke test plan for import stability
+- [x] Identify any currently user-facing imports that must remain stable
 
 ### Deliverable
 
@@ -110,30 +110,30 @@ This is the safest high-value first move because ROI code is already fairly self
 
 ### Move to `core/rois.py`
 
-- [ ] `ROI`
-- [ ] `ROIClass`
-- [ ] `ROICollection`
-- [ ] `read_ROI_from_csv`
-- [ ] `read_ROI_from_geojson`
-- [ ] `_coerce_roi_geometry`
-- [ ] `_coerce_roi`
-- [ ] `_geometry_to_roi_points`
-- [ ] `_normalize_roi_property`
-- [ ] `_geojson_class_name`
-- [ ] `_geojson_selection_name`
-- [ ] `_make_roi_name`
-- [ ] `_register_roi_record`
-- [ ] `_select_geojson_features`
-- [ ] `_match_geojson_row`
-- [ ] `_import_roi_records`
-- [ ] `_resolve_roi_selection_selector`
-- [ ] `_roi_bounds_um`
-- [ ] `_shapely_bounds`
+- [x] `ROI`
+- [x] `ROIClass`
+- [x] `ROICollection`
+- [x] `read_ROI_from_csv`
+- [x] `read_ROI_from_geojson`
+- [x] `_coerce_roi_geometry`
+- [x] `_coerce_roi`
+- [x] `_geometry_to_roi_points`
+- [x] `_normalize_roi_property`
+- [x] `_geojson_class_name`
+- [x] `_geojson_selection_name`
+- [x] `_make_roi_name`
+- [x] `_register_roi_record`
+- [x] `_select_geojson_features`
+- [x] `_match_geojson_row`
+- [x] `_import_roi_records`
+- [x] `_resolve_roi_selection_selector`
+- [x] `_roi_bounds_um`
+- [x] `_shapely_bounds`
 
 ### Follow-up
 
-- [ ] Update `XenData` to import ROI pieces from the new module
-- [ ] Re-export public ROI classes from `xentools.py`
+- [x] Update `XenData` to import ROI pieces from the new module
+- [x] Re-export public ROI classes from `xentools.py`
 
 ### Deliverable
 
@@ -146,25 +146,25 @@ This is the next major seam because `LazyTranscripts` is conceptually distinct.
 
 ### Move to `core/transcripts.py`
 
-- [ ] `LazyTranscripts`
-- [ ] `_detect_transcripts_format`
-- [ ] `_count_transcripts_in_bundle`
-- [ ] `_load_zarr_gene_names`
-- [ ] `_normalize_feature_selection`
-- [ ] `_bin_transcript_dataframe`
+- [x] `LazyTranscripts`
+- [x] `_detect_transcripts_format`
+- [x] `_count_transcripts_in_bundle`
+- [x] `_load_zarr_gene_names`
+- [x] `_normalize_feature_selection`
+- [x] `_bin_transcript_dataframe`
 
 ### Consider also moving here
 
-- [ ] `_encode_xenium_cell_ids`
+- [x] `_encode_xenium_cell_ids`
 
 Keep here only if it is mainly transcript/cell-zarr related; otherwise move it to
 `utils/metadata.py` or `io/zarr_read.py`.
 
 ### Follow-up
 
-- [ ] Update `XenData` imports
-- [ ] Ensure `create_binned_adata()` still works
-- [ ] Re-export `LazyTranscripts` from `xentools.py`
+- [x] Update `XenData` imports
+- [x] Ensure `create_binned_adata()` still works
+- [x] Re-export `LazyTranscripts` from `xentools.py`
 
 ### Deliverable
 
