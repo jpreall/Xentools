@@ -382,6 +382,11 @@ Progress:
 - [x] `XenData.create_binned_adata()` is now a thin wrapper over `analysis.binning.create_binned_adata()`
 - [x] `XenData.rasterize()` is now a thin wrapper over `pl.rasterize()`
 - [x] `XenData.write_ome_tiff()` is now a thin wrapper over `io.write.images.write_ome_tiff()`
+- [x] `experiment.xenium` parsing and image discovery moved to `io.read.metadata`
+- [x] transcript source selection/loading moved to `io.read.transcripts`
+- [x] boundary source selection/loading moved to `io.read.boundaries`
+- [x] cell matrix, clusters, and gene panel loading moved to `io.read.cells`
+- [x] reader orchestration moved to `io.read.loader.load_xenium_folder()`
 
 ### Responsibilities to remove from `XenData`
 

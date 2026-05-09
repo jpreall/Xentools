@@ -130,12 +130,21 @@ try:
         import_segmentation_xenium_parquet,
         import_segmentation_xenium_zarr,
     )
+    from .io.read.boundaries import load_xenium_boundaries
+    from .io.read.cells import (
+        _make_gene_panel_df as _read_make_gene_panel_df,
+        load_xenium_cell_matrix,
+        read_xen_panel as _read_xen_panel,
+        read_xenium_to_anndata as _read_xenium_to_anndata,
+    )
     from .io.read.images import (
-        _detect_linked_protein_images,
         _image_extent_um,
         _parse_ome_xml,
         _source_series_level_arrays,
     )
+    from .io.read.metadata import load_xenium_metadata
+    from .io.read.transcripts import load_xenium_transcripts
+    from .io.read.loader import load_xenium_folder
     from .io.write.xenium import (
         write_geo_submission as _write_geo_submission_bundle,
         write_xenium_explorer as _write_xenium_explorer_bundle,
@@ -174,10 +183,37 @@ except ImportError:
     create_polygon = _xenium_io_mod.create_polygon
     import_segmentation_xenium_parquet = _xenium_io_mod.import_segmentation_xenium_parquet
     import_segmentation_xenium_zarr = _xenium_io_mod.import_segmentation_xenium_zarr
-    _detect_linked_protein_images = _images_read_mod._detect_linked_protein_images
+    _boundaries_read_mod = _load_local_module(
+        "_xentools_io_read_boundaries",
+        os.path.join("io", "read", "boundaries.py"),
+    )
+    load_xenium_boundaries = _boundaries_read_mod.load_xenium_boundaries
+    _cells_read_mod = _load_local_module(
+        "_xentools_io_read_cells",
+        os.path.join("io", "read", "cells.py"),
+    )
+    _read_make_gene_panel_df = _cells_read_mod._make_gene_panel_df
+    load_xenium_cell_matrix = _cells_read_mod.load_xenium_cell_matrix
+    _read_xen_panel = _cells_read_mod.read_xen_panel
+    _read_xenium_to_anndata = _cells_read_mod.read_xenium_to_anndata
     _image_extent_um = _images_read_mod._image_extent_um
     _parse_ome_xml = _images_read_mod._parse_ome_xml
     _source_series_level_arrays = _images_read_mod._source_series_level_arrays
+    _metadata_read_mod = _load_local_module(
+        "_xentools_io_read_metadata",
+        os.path.join("io", "read", "metadata.py"),
+    )
+    load_xenium_metadata = _metadata_read_mod.load_xenium_metadata
+    _transcripts_read_mod = _load_local_module(
+        "_xentools_io_read_transcripts",
+        os.path.join("io", "read", "transcripts.py"),
+    )
+    load_xenium_transcripts = _transcripts_read_mod.load_xenium_transcripts
+    _loader_read_mod = _load_local_module(
+        "_xentools_io_read_loader",
+        os.path.join("io", "read", "loader.py"),
+    )
+    load_xenium_folder = _loader_read_mod.load_xenium_folder
     _write_geo_submission_bundle = _xenium_write_mod.write_geo_submission
     _write_xenium_explorer_bundle = _xenium_write_mod.write_xenium_explorer
     _build_pyramid_levels = _images_write_mod._build_pyramid_levels
@@ -199,9 +235,7 @@ def read_xen_panel(gene_panel_file):
     """
     Reads a Xenium gene panel file and returns the contents as a dictionary.
     """
-    with open(gene_panel_file) as f:
-        gene_panel = json.load(f)
-    return gene_panel
+    return _read_xen_panel(gene_panel_file)
 
 def read_json(json_file):
     """
@@ -216,32 +250,7 @@ def _make_gene_panel_df(gene_panel_dict):
     """
     Converts the gene panel dictionary to a DataFrame.
     """
-    out = {}
-    for target in gene_panel_dict['payload']['targets']:
-        ID = None
-        if 'id' in target['type']['data'].keys():
-            ID = target['type']['data']['id']
-        GENE_NAME = target['type']['data']['name']
-        DESC = target['type']['descriptor']
-        COVERAGE = target['info']['gene_coverage']
-        PAN_ID = target['source']['identity']['design_id']
-        PAN_NAME = target['source']['identity']['name']
-        
-    
-        out[GENE_NAME] = {}
-        out[GENE_NAME]['Gene_ID'] = ID
-        out[GENE_NAME]['Description'] = DESC
-        out[GENE_NAME]['Coverage'] = COVERAGE
-        out[GENE_NAME]['Panel_ID'] = PAN_ID
-        out[GENE_NAME]['Panel_Name'] = PAN_NAME
-
-        # Add the panel version if it exists
-        if 'version' in target['source']['identity'].keys():
-            PAN_VERS = target['source']['identity']['version']
-            out[GENE_NAME]['Panel_Version'] = PAN_VERS
-    
-    paneldf = pd.DataFrame.from_dict(out, orient='index')
-    return paneldf
+    return _read_make_gene_panel_df(gene_panel_dict)
 
 def um_to_pixels(
         arr: Union[
@@ -270,113 +279,10 @@ def um_to_pixels(
     return np.round(arr / pixel_size).astype(int)
 
 def read_xenium_to_anndata(xenium_output_folder, include_non_gene_features=False):
-    xdir = xenium_output_folder
-    #print(xdir)
-    # Choose which file to load the cell feature matrix from
-    # check for cell_feature_matrix.h5
-    try:
-        adata = sc.read_10x_h5(f'{xdir}/cell_feature_matrix.h5')
-    except FileNotFoundError:
-        if os.path.exists(f'{xdir}/cell_feature_matrix/'):
-            adata = sc.read_10x_mtx(f'{xdir}/cell_feature_matrix/', gex_only=False)
-
-    feature_names = pd.Index(adata.var_names.astype(str))
-    total_mask = feature_names == "Total transcripts"
-    if total_mask.any():
-        total_idx = np.flatnonzero(total_mask)[0]
-        total_values = adata.X[:, total_idx]
-        if hasattr(total_values, "toarray"):
-            total_values = total_values.toarray()
-        adata.obs["total_transcripts"] = np.asarray(total_values).ravel().astype(np.int64)
-
-    if "feature_types" in adata.var:
-        feature_types = adata.var["feature_types"].astype(str).str.lower()
-        gene_mask = feature_types.isin(["gene", "gene expression"]).to_numpy()
-    else:
-        gene_mask = ~feature_names.str.contains("codeword|controlprobe|control_codeword", case=False, regex=True)
-
-    keep_features = ~total_mask if include_non_gene_features else (gene_mask & ~total_mask)
-    if not keep_features.all():
-        adata = adata[:, np.asarray(keep_features)].copy()
-
-    # Read in cell-level metadata
-    cells = pd.read_parquet(f'{xdir}/cells.parquet')
-    cells.index = cells['cell_id'].astype('str')
-    adata.obsm['spatial'] = cells.loc[:,['x_centroid','y_centroid']].values
-
-    # Read in UMAP coords
-    umap_file = xdir + '/analysis/umap/gene_expression_2_components/projection.csv'
-    try:
-        umap_coords = pd.read_csv(umap_file, index_col=0)
-        umap_coords.index = umap_coords.index.astype(str)
-
-        # Align to all cells in adata; missing cells get NaNs
-        coords_all = umap_coords.reindex(adata.obs_names)
-
-        # Store as "X_umap" (shape: n_cells × 2, with NaNs where UMAP is missing)
-        adata.obsm['X_umap'] = coords_all.to_numpy()
-
-    except FileNotFoundError:
-        print('No UMAP coordinates found.')
-        
-
-    # Flip spatial coords to match Xenium Ranger
-    #rot_matrix = [[1,0],[0,-1]]
-    #adata.obsm['spatial'] = adata.obsm['spatial'] @ rot_matrix
-
-    # Match Xenium Ranger aspect ratio
-    xrange = adata.obsm['spatial'][:,0].max() - adata.obsm['spatial'][:,0].min()
-    yrange = adata.obsm['spatial'][:,1].max() - adata.obsm['spatial'][:,1].min()
-    aspect_ratio = xrange/yrange
-    adata.uns['aspect_ratio'] = aspect_ratio
-    #pl.rcParams['figure.figsize'] = [4*aspect_ratio,4]
-
-    # Read in gene panel
-    gene_panel = read_xen_panel(xdir + '/gene_panel.json')
-    try:
-        species = gene_panel['payload']['panel']['species']
-    except KeyError:
-        species = 'Unknown'
-    adata.uns['genome'] = species
-
-    ### Start Scanpy Pipeline
-    # Stash matrix layers
-    adata.layers['counts'] = adata.X.astype('int').copy()
-    adata.layers['TP10K'] = normalize_tp10k(adata.layers['counts'], log1p=True).astype('float32')
-    adata.X = adata.layers['TP10K'].copy()
-
-    # Compute QC metrics
-    adata.obs['n_counts'] = adata.X.sum(1).A1.astype('int')
-    adata.var['total_counts'] = adata.X.sum(0).A1.astype('int')
-    adata.obs['n_genes'] = np.sum(adata.X > 0, axis=1).A1.astype('int')
-    adata.obs['logUMIs'] = np.log(adata.obs['n_counts'] + 1)
-
-    # Should I store a raw copy?
-    #adata.raw = adata.copy()
-    
-    # Add Xenium Ranger annotations
-    print('Importing Xenium Ranger cluster annotations')
-    cfiles = glob.glob(xdir + '/analysis/clustering/*/*csv')
-    res = pd.DataFrame()
-    for f in cfiles:
-        cname = f.split('/')[-2].replace('gene_expression_','')
-        #print(cname)
-        clusterdf = pd.read_csv(f, index_col=0)
-        clusterdf.index = clusterdf.index.astype('str')
-
-        
-        #clusters = clusterdf['Cluster'].rename(cname).loc[adata.obs_names].astype('str').astype('category')
-        clusters = clusterdf['Cluster'].rename(cname).astype('str').astype('category')
-        res = pd.concat([res,clusters], axis=1)
-    
-    # Safely import cluster labels even if some cells are missing
-    res = res.reindex(adata.obs_names)
-    adata.obs = adata.obs.merge(res, left_index=True, right_index=True, how='left')
-    
-
-    print(adata)
-    print("Ready!")
-    return adata
+    return _read_xenium_to_anndata(
+        xenium_output_folder,
+        include_non_gene_features=include_non_gene_features,
+    )
 
 def read_xen_essentials(xenium_folder, verbose = True):
     panel_file = f'{xenium_folder}/gene_panel.json'
@@ -506,150 +412,37 @@ class XenData:
         self.xenium_folder = xenium_folder
         self.cache_threshold = cache_threshold
         self.eager_transcript_threshold = int(eager_transcript_threshold)
-        bundle_transcripts_fmt = _detect_transcripts_format(
+        loaded = load_xenium_folder(
             xenium_folder,
-            transcript_source='auto',
-        )
-        resolved_transcript_source = transcript_source
-        self.n_transcripts = _count_transcripts_in_bundle(xenium_folder)
-
-        if (
-            transcript_source == 'auto'
-            and bundle_transcripts_fmt == 'zarr'
-            and os.path.exists(os.path.join(xenium_folder, 'transcripts.parquet'))
-            and self.n_transcripts < self.eager_transcript_threshold
-        ):
-            resolved_transcript_source = 'parquet'
-            if verbose:
-                print(
-                    f"Dataset has {self.n_transcripts:,} transcripts "
-                    f"(< {self.eager_transcript_threshold:,}); using transcripts.parquet."
-                )
-
-        self._transcripts_fmt = _detect_transcripts_format(
-            xenium_folder,
-            transcript_source=resolved_transcript_source,
+            transcript_source=transcript_source,
+            cache_threshold=cache_threshold,
+            eager_transcript_threshold=self.eager_transcript_threshold,
+            boundary_source=boundary_source,
+            lazy_boundaries=lazy_boundaries,
+            include_non_gene_features=include_non_gene_features,
+            verbose=verbose,
         )
 
-        if bundle_transcripts_fmt == 'zarr':
-            # ── Zarr-backed bundle; transcript source can still be overridden ──
-            gene_names = _load_zarr_gene_names(xenium_folder)
-            if self._transcripts_fmt == 'zarr':
-                zarr_path = os.path.join(xenium_folder, 'transcripts.zarr.zip')
-                if verbose:
-                    print(f'Zarr format detected.  Indexing {len(gene_names):,} genes across '
-                          f'transcripts.zarr.zip...')
-                self.trans = LazyTranscripts(zarr_path, gene_names,
-                                             cache_threshold=cache_threshold,
-                                             verbose=verbose)
-                if verbose:
-                    print(f'  {self.trans.n_transcripts:,} transcripts in '
-                          f'{len(self.trans._tile_meta)} spatial tiles.')
-            else:
-                if verbose:
-                    print('Using transcripts.parquet for rich transcript metadata...')
-                self.trans = pd.read_parquet(os.path.join(xenium_folder, 'transcripts.parquet'))
-                sample = self.trans["feature_name"].iloc[:100]
-                if sample.map(lambda x: isinstance(x, (bytes, bytearray))).any():
-                    self.trans["feature_name"] = self.trans["feature_name"].str.decode("utf-8")
+        transcripts = loaded.transcripts
+        self.trans = transcripts.trans
+        self.n_transcripts = transcripts.n_transcripts
+        self._transcripts_fmt = transcripts.transcript_format
 
-            panel_file = os.path.join(xenium_folder, 'gene_panel.json')
-            self.gene_panel = read_xen_panel(panel_file) if os.path.exists(panel_file) else None
-            self.adata      = _read_zarr_adata(
-                xenium_folder,
-                verbose=verbose,
-                include_non_gene_features=include_non_gene_features,
-            )
-            self.clusters   = _read_analysis_zarr(xenium_folder, verbose=verbose)
-            if len(self.clusters):
-                self.adata.obs = self.adata.obs.merge(
-                    self.clusters, left_index=True, right_index=True, how='left')
-        elif bundle_transcripts_fmt == 'parquet':
-            # ── Classic parquet-format dataset ────────────────────────────
-            self.trans, self.clusters, self.gene_panel = read_xen_essentials(xenium_folder, verbose)
+        cells = loaded.cells
+        self.adata = cells.adata
+        self.clusters = cells.clusters
+        self.gene_panel = cells.gene_panel
 
-            if verbose:
-                print('Reading in AnnData object')
-            self.adata = read_xenium_to_anndata(
-                xenium_folder,
-                include_non_gene_features=include_non_gene_features,
-            )
+        boundaries = loaded.boundaries
+        self.cell_boundaries = boundaries.cell_boundaries
+        self.nucleus_boundaries = boundaries.nucleus_boundaries
+        self._boundary_source = boundaries.boundary_source
+        self._lazy_boundaries = boundaries.lazy_boundaries
 
-            self.adata.obs = self.adata.obs.merge(
-                self.clusters, left_index=True, right_index=True, how='left')
-            self.adata.var.merge(
-                _make_gene_panel_df(self.gene_panel),
-                left_index=True, right_index=True, how='left')
-
-        # ── Common to both formats ─────────────────────────────────────────
-        cell_boundaries_file = os.path.join(xenium_folder, 'cell_boundaries.parquet')
-        nuc_boundaries_file  = os.path.join(xenium_folder, 'nucleus_boundaries.parquet')
-        cells_zarr_file = os.path.join(xenium_folder, 'cells.zarr.zip')
-
-        has_boundary_parquet = os.path.exists(cell_boundaries_file) and os.path.exists(nuc_boundaries_file)
-        has_cells_zarr = os.path.exists(cells_zarr_file)
-
-        if boundary_source == 'parquet':
-            if not has_boundary_parquet:
-                raise FileNotFoundError(
-                    f"Requested boundary_source='parquet' but boundary parquet files were not found in {xenium_folder}"
-                )
-            resolved_boundary_source = 'parquet'
-        elif boundary_source == 'zarr':
-            if not has_cells_zarr:
-                raise FileNotFoundError(
-                    f"Requested boundary_source='zarr' but cells.zarr.zip was not found in {xenium_folder}"
-                )
-            resolved_boundary_source = 'zarr'
-        else:
-            if has_boundary_parquet:
-                resolved_boundary_source = 'parquet'
-            elif has_cells_zarr:
-                resolved_boundary_source = 'zarr'
-            else:
-                resolved_boundary_source = None
-
-        if resolved_boundary_source == 'parquet':
-            if verbose:
-                print('Reading in cell boundaries')
-            self.cell_boundaries = import_segmentation_xenium_parquet(cell_boundaries_file)
-
-            if verbose:
-                print('Reading in nucleus boundaries')
-            self.nucleus_boundaries = import_segmentation_xenium_parquet(nuc_boundaries_file)
-        elif resolved_boundary_source == 'zarr':
-            if lazy_boundaries:
-                if verbose:
-                    print('Registering lazy Zarr-backed cell boundaries')
-                self.cell_boundaries = LazyBoundaryGeoDataFrame(
-                    lambda: import_segmentation_xenium_zarr(cells_zarr_file, kind='cell'),
-                    label='cell boundaries from cells.zarr.zip',
-                )
-                self.nucleus_boundaries = LazyBoundaryGeoDataFrame(
-                    lambda: import_segmentation_xenium_zarr(cells_zarr_file, kind='nucleus'),
-                    label='nucleus boundaries from cells.zarr.zip',
-                )
-            else:
-                if verbose:
-                    print('Reading in cell boundaries from cells.zarr.zip')
-                self.cell_boundaries = import_segmentation_xenium_zarr(cells_zarr_file, kind='cell')
-                if verbose:
-                    print('Reading in nucleus boundaries from cells.zarr.zip')
-                self.nucleus_boundaries = import_segmentation_xenium_zarr(cells_zarr_file, kind='nucleus')
-        else:
-            self.cell_boundaries = None
-            self.nucleus_boundaries = None
-        self._boundary_source = resolved_boundary_source
-        self._lazy_boundaries = bool(lazy_boundaries and resolved_boundary_source == 'zarr')
-
-
-        xenium_file = os.path.join(xenium_folder, 'experiment.xenium')
-        with open(xenium_file) as f:
-            self.xenium_metadata = json.load(f)
-        self.pixel_size = self.xenium_metadata['pixel_size']
-
-        keys = ['run_name', 'slide_id', 'region_name']
-        self.name = '_'.join([self.xenium_metadata[k] for k in keys])
+        metadata = loaded.metadata
+        self.xenium_metadata = metadata.metadata
+        self.pixel_size = metadata.pixel_size
+        self.name = metadata.name
 
         self.ROIs = ROICollection()
         self.rois = self.ROIs
@@ -657,17 +450,8 @@ class XenData:
         self.subset_roi = None
         self.update_cell_names()
 
-        self.images = {}
-        if os.path.exists(os.path.join(xenium_folder, 'morphology.ome.tif')):
-            self.images['DAPI'] = os.path.join(xenium_folder, 'morphology.ome.tif')
-        self.protein_images = _detect_linked_protein_images(xenium_folder)
-        if self.protein_images is not None:
-            self.images['Protein'] = self.protein_images['folder']
-            if 'DAPI' not in self.images:
-                channel_names = self.protein_images.get('channel_names', [])
-                dapi_matches = [i for i, name in enumerate(channel_names) if str(name).upper() == 'DAPI']
-                if dapi_matches:
-                    self.images['DAPI'] = self.protein_images['files'][dapi_matches[0]]
+        self.images = metadata.images
+        self.protein_images = metadata.protein_images
 
         if roi_file is not None:
             if verbose:
