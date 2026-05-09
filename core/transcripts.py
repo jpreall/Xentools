@@ -4,10 +4,51 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import importlib.util
 from typing import Literal
 
 import numpy as np
 import pandas as pd
+
+def _load_local_module(module_name, relative_path):
+    """Load a sibling xentools module by file path when imported outside a package."""
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    module_path = os.path.join(os.path.dirname(__file__), relative_path)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load local module {module_name} from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+try:
+    from ..io.read.zarr import _open_zarr_group_compat
+except ImportError:
+    _open_zarr_group_compat = _load_local_module(
+        "_xentools_io_read_zarr",
+        os.path.join("..", "io", "read", "zarr.py"),
+    )._open_zarr_group_compat
+
+try:
+    from ..utils.metadata import _encode_xenium_cell_ids
+except ImportError:
+    _encode_xenium_cell_ids = _load_local_module(
+        "_xentools_utils_metadata",
+        os.path.join("..", "utils", "metadata.py"),
+    )._encode_xenium_cell_ids
+
+try:
+    from ..analysis.binning import _bin_transcript_dataframe
+except ImportError:
+    _bin_transcript_dataframe = _load_local_module(
+        "_xentools_analysis_binning",
+        os.path.join("..", "analysis", "binning.py"),
+    )._bin_transcript_dataframe
 
 __all__ = [
     "LazyTranscripts",
@@ -18,23 +59,6 @@ __all__ = [
     "_normalize_feature_selection",
     "_bin_transcript_dataframe",
 ]
-
-
-def _open_zarr_group_compat(zarr_module, store, mode="r", *, force_v2=False):
-    """
-    Open a Zarr group across Zarr 2 and 3.
-
-    Zarr 3 accepts ``zarr_format=2`` so we can emit/read v2 metadata explicitly.
-    Zarr 2 rejects that keyword and already uses v2 metadata.
-    """
-    kwargs = {"store": store, "mode": mode}
-    if force_v2:
-        try:
-            return zarr_module.open_group(**kwargs, zarr_format=2)
-        except TypeError as exc:
-            if "zarr_format" not in str(exc):
-                raise
-    return zarr_module.open_group(**kwargs)
 
 
 def _detect_transcripts_format(folder, transcript_source: Literal["auto", "zarr", "parquet"] = "auto"):
@@ -93,16 +117,6 @@ def _count_transcripts_in_bundle(folder):
     )
 
 
-def _encode_xenium_cell_ids(prefix_arr, suffix_arr):
-    """Convert raw cell_id columns to Xenium hash strings (e.g. 'aaaabbbb-12345')."""
-    prefix_arr = prefix_arr.astype(np.uint32)
-    suffix_arr = suffix_arr.astype(np.uint32)
-    hex_strs = np.char.zfill(np.vectorize(lambda x: format(x, "x"))(prefix_arr), 8)
-    trans = str.maketrans("0123456789abcdef", "abcdefghijklmnop")
-    shifted = np.char.translate(hex_strs, trans)
-    return np.char.add(np.char.add(shifted, "-"), suffix_arr.astype(str))
-
-
 def _load_zarr_gene_names(folder):
     """
     Return the ordered gene name list whose index matches gene_identity values in
@@ -145,98 +159,6 @@ def _normalize_feature_selection(features, available_features, arg_name="feature
     return selected
 
 
-def _bin_transcript_dataframe(df, bin_size, feature_names):
-    """
-    Aggregate a transcript table into a shared binning spec used by xarray and AnnData views.
-    """
-    feature_names = list(feature_names)
-    if bin_size <= 0:
-        raise ValueError("bin_size must be > 0.")
-
-    if df.empty:
-        return {
-            "feature_names": np.asarray(feature_names, dtype=object),
-            "x_bin_values": np.array([], dtype=int),
-            "y_bin_values": np.array([], dtype=int),
-            "x_centers_um": np.array([], dtype=float),
-            "y_centers_um": np.array([], dtype=float),
-            "feature_indices": np.array([], dtype=int),
-            "x_indices": np.array([], dtype=int),
-            "y_indices": np.array([], dtype=int),
-            "counts": np.array([], dtype=np.uint32),
-            "shape": (len(feature_names), 0, 0),
-            "occupied_x_bins": np.array([], dtype=int),
-            "occupied_y_bins": np.array([], dtype=int),
-            "bin_rows": np.array([], dtype=int),
-        }
-
-    work = df.loc[:, ["x_location", "y_location", "feature_name"]].copy()
-    work["x_bin"] = np.floor(work["x_location"] / bin_size).astype(int)
-    work["y_bin"] = np.floor(work["y_location"] / bin_size).astype(int)
-
-    grouped = work.groupby(["feature_name", "y_bin", "x_bin"]).size().reset_index(name="count")
-
-    feature_index = {gene: i for i, gene in enumerate(feature_names)}
-    grouped = grouped[grouped["feature_name"].isin(feature_index)].copy()
-
-    if grouped.empty:
-        return {
-            "feature_names": np.asarray(feature_names, dtype=object),
-            "x_bin_values": np.array([], dtype=int),
-            "y_bin_values": np.array([], dtype=int),
-            "x_centers_um": np.array([], dtype=float),
-            "y_centers_um": np.array([], dtype=float),
-            "feature_indices": np.array([], dtype=int),
-            "x_indices": np.array([], dtype=int),
-            "y_indices": np.array([], dtype=int),
-            "counts": np.array([], dtype=np.uint32),
-            "shape": (len(feature_names), 0, 0),
-            "occupied_x_bins": np.array([], dtype=int),
-            "occupied_y_bins": np.array([], dtype=int),
-            "bin_rows": np.array([], dtype=int),
-        }
-
-    x_min_bin = int(grouped["x_bin"].min())
-    x_max_bin = int(grouped["x_bin"].max())
-    y_min_bin = int(grouped["y_bin"].min())
-    y_max_bin = int(grouped["y_bin"].max())
-
-    x_bin_values = np.arange(x_min_bin, x_max_bin + 1, dtype=int)
-    y_bin_values = np.arange(y_min_bin, y_max_bin + 1, dtype=int)
-    x_centers_um = (x_bin_values + 0.5) * float(bin_size)
-    y_centers_um = (y_bin_values + 0.5) * float(bin_size)
-
-    grouped["feature_index"] = grouped["feature_name"].map(feature_index).astype(int)
-    grouped["x_index"] = grouped["x_bin"] - x_min_bin
-    grouped["y_index"] = grouped["y_bin"] - y_min_bin
-
-    occupied_bins = (
-        grouped.loc[:, ["x_bin", "y_bin"]].drop_duplicates().sort_values(["y_bin", "x_bin"]).reset_index(drop=True)
-    )
-    occupied_keys = list(zip(occupied_bins["x_bin"], occupied_bins["y_bin"]))
-    occupied_lookup = {key: i for i, key in enumerate(occupied_keys)}
-    grouped["bin_row"] = [
-        occupied_lookup[(x_bin, y_bin)]
-        for x_bin, y_bin in zip(grouped["x_bin"], grouped["y_bin"])
-    ]
-
-    return {
-        "feature_names": np.asarray(feature_names, dtype=object),
-        "x_bin_values": x_bin_values,
-        "y_bin_values": y_bin_values,
-        "x_centers_um": x_centers_um,
-        "y_centers_um": y_centers_um,
-        "feature_indices": grouped["feature_index"].to_numpy(dtype=int),
-        "x_indices": grouped["x_index"].to_numpy(dtype=int),
-        "y_indices": grouped["y_index"].to_numpy(dtype=int),
-        "counts": grouped["count"].to_numpy(dtype=np.uint32),
-        "shape": (len(feature_names), len(y_bin_values), len(x_bin_values)),
-        "occupied_x_bins": occupied_bins["x_bin"].to_numpy(dtype=int),
-        "occupied_y_bins": occupied_bins["y_bin"].to_numpy(dtype=int),
-        "bin_rows": grouped["bin_row"].to_numpy(dtype=int),
-    }
-
-
 class LazyTranscripts:
     """
     Memory-efficient lazy accessor for Xenium/Atera transcript data in transcripts.zarr.zip.
@@ -254,18 +176,31 @@ class LazyTranscripts:
         self._query_cache = {}
         self._tile_meta = {}
         self._tile_size = (500.0, 500.0)
+        self._tile_index_mode = "unknown"
         self._load_tile_metadata(verbose)
 
     def _load_tile_metadata(self, verbose=True):
         """
-        Build a lightweight spatial index from tile metadata and one sampled point per tile.
+        Build a lightweight spatial index for level-0 transcript tiles.
+
+        Recent Xenium/Atera transcript Zarr bundles provide an explicit map in
+        ``grids/.zattrs``: level-0 ``grid_keys``, object counts, and ``grid_size``.
+        Older or malformed bundles fall back to sampling one coordinate per tile.
         """
         import zipfile
         import zarr
 
-        tile_keys = []
         with zipfile.ZipFile(self._path) as zf:
             names = set(zf.namelist())
+            if self._load_explicit_tile_metadata(zf, names):
+                if verbose:
+                    print(
+                        f"  Loaded explicit spatial index for {len(self._tile_meta)} tiles "
+                        f"from transcripts.zarr.zip metadata."
+                    )
+                return
+
+            tile_keys = []
             for name in names:
                 if name.startswith("grids/0/") and name.endswith("location/.zarray"):
                     parts = name.split("/")
@@ -301,6 +236,85 @@ class LazyTranscripts:
             print("done.")
 
         self._tile_size = self._estimate_tile_size()
+        self._tile_index_mode = "sampled"
+
+    def _load_explicit_tile_metadata(self, zf, names):
+        """
+        Load tile bounds from ``grids/.zattrs`` when the official grid map is present.
+        """
+        if "grids/.zattrs" not in names:
+            return False
+
+        try:
+            attrs = json.loads(zf.read("grids/.zattrs").decode())
+            grid_size = attrs["grid_size"]
+            grid_keys = attrs["grid_keys"][0]
+            grid_counts = attrs.get("grid_number_objects", [[]])[0]
+        except Exception:
+            return False
+
+        if not grid_keys:
+            return False
+
+        try:
+            if len(grid_size) == 1:
+                dx = dy = float(grid_size[0])
+            else:
+                dx, dy = float(grid_size[0]), float(grid_size[1])
+        except Exception:
+            return False
+
+        if dx <= 0 or dy <= 0:
+            return False
+
+        if len(grid_counts) != len(grid_keys):
+            grid_counts = [None] * len(grid_keys)
+
+        tile_meta = {}
+        for key, count in zip(grid_keys, grid_counts):
+            if "," not in str(key):
+                return False
+            try:
+                col, row = (int(v) for v in str(key).split(",", maxsplit=1))
+            except ValueError:
+                return False
+
+            if count is None:
+                zarray_name = f"grids/0/{key}/location/.zarray"
+                if zarray_name not in names:
+                    continue
+                try:
+                    count = json.loads(zf.read(zarray_name).decode())["shape"][0]
+                except Exception:
+                    return False
+
+            count = int(count)
+            if count <= 0:
+                continue
+
+            x0 = col * dx
+            x1 = (col + 1) * dx
+            y0 = row * dy
+            y1 = (row + 1) * dy
+            tile_meta[str(key)] = {
+                "n": count,
+                "col": col,
+                "row": row,
+                "x0": x0,
+                "x1": x1,
+                "y0": y0,
+                "y1": y1,
+                "x": (x0 + x1) / 2,
+                "y": (y0 + y1) / 2,
+            }
+
+        if not tile_meta:
+            return False
+
+        self._tile_meta = tile_meta
+        self._tile_size = (dx, dy)
+        self._tile_index_mode = "explicit"
+        return True
 
     def _estimate_tile_size(self):
         if not self._tile_meta:
@@ -326,6 +340,28 @@ class LazyTranscripts:
         return (max(dx, 50.0), max(dy, 50.0))
 
     def _candidate_tiles(self, xmin, xmax, ymin, ymax):
+        if self._tile_index_mode == "explicit":
+            if not all(np.isfinite(v) for v in (xmin, xmax, ymin, ymax)):
+                return [
+                    key
+                    for key, m in self._tile_meta.items()
+                    if m["x1"] >= xmin and m["x0"] <= xmax and m["y1"] >= ymin and m["y0"] <= ymax
+                ]
+
+            dx, dy = self._tile_size
+            col_min = int(np.floor(np.nextafter(xmin, -np.inf) / dx))
+            col_max = int(np.floor(xmax / dx))
+            row_min = int(np.floor(np.nextafter(ymin, -np.inf) / dy))
+            row_max = int(np.floor(ymax / dy))
+
+            keys = []
+            for col in range(col_min, col_max + 1):
+                for row in range(row_min, row_max + 1):
+                    key = f"{col},{row}"
+                    if key in self._tile_meta:
+                        keys.append(key)
+            return keys
+
         dx, dy = self._tile_size
         x0, x1 = xmin - dx, xmax + dx
         y0, y1 = ymin - dy, ymax + dy
@@ -476,6 +512,14 @@ class LazyTranscripts:
 
     @property
     def frame(self):
+        if self._tile_index_mode == "explicit":
+            x0 = [m["x0"] for m in self._tile_meta.values()]
+            x1 = [m["x1"] for m in self._tile_meta.values()]
+            y0 = [m["y0"] for m in self._tile_meta.values()]
+            y1 = [m["y1"] for m in self._tile_meta.values()]
+            if x0 and y0:
+                return np.array([[min(x0), max(x1)], [min(y0), max(y1)]])
+
         xs = [m["x"] for m in self._tile_meta.values() if m["x"] is not None]
         ys = [m["y"] for m in self._tile_meta.values() if m["y"] is not None]
         if xs and ys:
@@ -543,6 +587,7 @@ class LazyTranscripts:
         cached = len(self._query_cache)
         return (
             f"LazyTranscripts({n:,} transcripts | {t} tiles | "
-            f"{g:,} genes | cache_threshold={self.cache_threshold:,} | "
+            f"{g:,} genes | tile_index={self._tile_index_mode} | "
+            f"cache_threshold={self.cache_threshold:,} | "
             f"{cached} cached queries)"
         )

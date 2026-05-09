@@ -1,17 +1,68 @@
 #!/usr/bin/env python
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as pl
+import matplotlib.pyplot as plt
 import glob, os, sys
 import scanpy as sc
 import json
 import geopandas as gpd
 import re
-import shutil
 import uuid
+import importlib.util
 from typing import Union, Optional, Literal
 from scipy import sparse
 from matplotlib.patches import Patch
+
+
+def _load_local_module(module_name, relative_path):
+    """Load a sibling module by file path for standalone `xentools.py` imports."""
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    module_path = os.path.join(os.path.dirname(__file__), relative_path)
+    if os.path.basename(module_path) == "__init__.py":
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            module_path,
+            submodule_search_locations=[os.path.dirname(module_path)],
+        )
+    else:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load local module {module_name} from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+try:
+    from .analysis.binning import create_binned_adata as _create_binned_adata
+    from .analysis.graph import _apply_weights, build_spatial_graph
+    from .analysis.niches import build_niches, evaluate_niche_k_values
+    from .analysis.normalization import normalize_tp10k
+except ImportError:
+    _binning_mod = _load_local_module(
+        "_xentools_analysis_binning",
+        os.path.join("analysis", "binning.py"),
+    )
+    _graph_mod = _load_local_module(
+        "_xentools_analysis_graph",
+        os.path.join("analysis", "graph.py"),
+    )
+    _niches_mod = _load_local_module(
+        "_xentools_analysis_niches",
+        os.path.join("analysis", "niches.py"),
+    )
+    _normalization_mod = _load_local_module(
+        "_xentools_analysis_normalization",
+        os.path.join("analysis", "normalization.py"),
+    )
+    _create_binned_adata = _binning_mod.create_binned_adata
+    _apply_weights = _graph_mod._apply_weights
+    build_spatial_graph = _graph_mod.build_spatial_graph
+    build_niches = _niches_mod.build_niches
+    evaluate_niche_k_values = _niches_mod.evaluate_niche_k_values
+    normalize_tp10k = _normalization_mod.normalize_tp10k
 
 try:
     from .core.rois import (
@@ -35,6 +86,7 @@ try:
         _roi_bounds_um,
         _shapely_bounds,
     )
+    from .core.boundaries import LazyBoundaryGeoDataFrame
 except ImportError:
     from core.rois import (
         ROI,
@@ -57,6 +109,7 @@ except ImportError:
         _roi_bounds_um,
         _shapely_bounds,
     )
+    from core.boundaries import LazyBoundaryGeoDataFrame
 
 try:
     from .core.transcripts import (
@@ -65,36 +118,80 @@ try:
         _count_transcripts_in_bundle,
         _encode_xenium_cell_ids,
         _load_zarr_gene_names,
-        _normalize_feature_selection,
-        _bin_transcript_dataframe,
+    )
+
+    from .io.read.zarr import (
+        _open_zarr_group_compat,
+        _read_zarr_adata,
+        _read_analysis_zarr,
+    )
+    from .io.read.xenium import (
+        create_polygon,
+        import_segmentation_xenium_parquet,
+        import_segmentation_xenium_zarr,
+    )
+    from .io.read.images import (
+        _detect_linked_protein_images,
+        _image_extent_um,
+        _parse_ome_xml,
+        _source_series_level_arrays,
+    )
+    from .io.write.xenium import (
+        write_geo_submission as _write_geo_submission_bundle,
+        write_xenium_explorer as _write_xenium_explorer_bundle,
+    )
+    from .io.write.images import (
+        _build_pyramid_levels,
+        _cropped_shape_from_bounds,
+        _iter_cropped_tiles,
+        _linked_ome_xml,
+        _pixel_aligned_bounds_um,
+        _roi_bounds_in_pixels,
+        _scale_bounds_for_level,
+        _write_linked_pyramidal_ome_tiffs,
+        _write_linked_pyramidal_ome_tiffs_from_levels,
+        write_ome_tiff as _write_ome_tiff_bundle,
+        _write_pyramidal_ome_tiff,
+        _write_pyramidal_ome_tiff_from_levels,
     )
 except ImportError:
-    from core.transcripts import (
-        LazyTranscripts,
-        _detect_transcripts_format,
-        _count_transcripts_in_bundle,
-        _encode_xenium_cell_ids,
-        _load_zarr_gene_names,
-        _normalize_feature_selection,
-        _bin_transcript_dataframe,
-    )
+    _transcripts_mod = _load_local_module("_xentools_core_transcripts", "core/transcripts.py")
+    _zarr_read_mod = _load_local_module("_xentools_io_read_zarr", os.path.join("io", "read", "zarr.py"))
+    _xenium_io_mod = _load_local_module("_xentools_io_read_xenium", os.path.join("io", "read", "xenium.py"))
+    _xenium_write_mod = _load_local_module("_xentools_io_write_xenium", os.path.join("io", "write", "xenium.py"))
+    _images_read_mod = _load_local_module("_xentools_io_read_images", os.path.join("io", "read", "images.py"))
+    _images_write_mod = _load_local_module("_xentools_io_write_images", os.path.join("io", "write", "images.py"))
 
+    LazyTranscripts = _transcripts_mod.LazyTranscripts
+    _detect_transcripts_format = _transcripts_mod._detect_transcripts_format
+    _count_transcripts_in_bundle = _transcripts_mod._count_transcripts_in_bundle
+    _encode_xenium_cell_ids = _transcripts_mod._encode_xenium_cell_ids
+    _load_zarr_gene_names = _transcripts_mod._load_zarr_gene_names
 
-def _open_zarr_group_compat(zarr_module, store, mode="r", *, force_v2=False):
-    """
-    Open a Zarr group across Zarr 2 and 3.
-
-    Zarr 3 accepts ``zarr_format=2`` so we can emit/read v2 metadata explicitly.
-    Zarr 2 rejects that keyword and already uses v2 metadata.
-    """
-    kwargs = {"store": store, "mode": mode}
-    if force_v2:
-        try:
-            return zarr_module.open_group(**kwargs, zarr_format=2)
-        except TypeError as exc:
-            if "zarr_format" not in str(exc):
-                raise
-    return zarr_module.open_group(**kwargs)
+    _open_zarr_group_compat = _zarr_read_mod._open_zarr_group_compat
+    _read_zarr_adata = _zarr_read_mod._read_zarr_adata
+    _read_analysis_zarr = _zarr_read_mod._read_analysis_zarr
+    create_polygon = _xenium_io_mod.create_polygon
+    import_segmentation_xenium_parquet = _xenium_io_mod.import_segmentation_xenium_parquet
+    import_segmentation_xenium_zarr = _xenium_io_mod.import_segmentation_xenium_zarr
+    _detect_linked_protein_images = _images_read_mod._detect_linked_protein_images
+    _image_extent_um = _images_read_mod._image_extent_um
+    _parse_ome_xml = _images_read_mod._parse_ome_xml
+    _source_series_level_arrays = _images_read_mod._source_series_level_arrays
+    _write_geo_submission_bundle = _xenium_write_mod.write_geo_submission
+    _write_xenium_explorer_bundle = _xenium_write_mod.write_xenium_explorer
+    _build_pyramid_levels = _images_write_mod._build_pyramid_levels
+    _cropped_shape_from_bounds = _images_write_mod._cropped_shape_from_bounds
+    _iter_cropped_tiles = _images_write_mod._iter_cropped_tiles
+    _linked_ome_xml = _images_write_mod._linked_ome_xml
+    _pixel_aligned_bounds_um = _images_write_mod._pixel_aligned_bounds_um
+    _roi_bounds_in_pixels = _images_write_mod._roi_bounds_in_pixels
+    _scale_bounds_for_level = _images_write_mod._scale_bounds_for_level
+    _write_linked_pyramidal_ome_tiffs = _images_write_mod._write_linked_pyramidal_ome_tiffs
+    _write_linked_pyramidal_ome_tiffs_from_levels = _images_write_mod._write_linked_pyramidal_ome_tiffs_from_levels
+    _write_ome_tiff_bundle = _images_write_mod.write_ome_tiff
+    _write_pyramidal_ome_tiff = _images_write_mod._write_pyramidal_ome_tiff
+    _write_pyramidal_ome_tiff_from_levels = _images_write_mod._write_pyramidal_ome_tiff_from_levels
 
 
 
@@ -146,43 +243,6 @@ def _make_gene_panel_df(gene_panel_dict):
     paneldf = pd.DataFrame.from_dict(out, orient='index')
     return paneldf
 
-def to_TP10k(counts):
-    """
-    Convert a count matrix (dense or sparse) to TP10K (transcripts-per-10k)
-    and return a CSR sparse matrix.
-    """
-    # ensure sparse
-    from scipy import sparse
-    if not sparse.issparse(counts):
-        counts = sparse.csr_matrix(counts)
-
-    # library size per cell
-    libsize = np.asarray(counts.sum(axis=1)).flatten()
-
-    # avoid division by zero
-    libsize[libsize == 0] = 1
-
-    # scale to 10k
-    scaled = counts.multiply(1e4 / libsize[:, None])
-
-    # log1p transform
-    scaled = scaled.log1p()
-
-    return sparse.csr_matrix(scaled)
-
-def TP10K(adata):
-    """
-    Normalize the counts in adata to transcripts per 10,000 (TP10K).
-    This function assumes that the counts are stored in the 'counts' layer of adata.
-    """
-    # Check if 'counts' layer exists
-    if 'counts' not in adata.layers:
-        raise ValueError("The 'counts' layer is not found in the AnnData object.")
-    from scipy import sparse
-    counts = adata.layers['counts']
-    adata.layers['TP10K'] = sparse.csr_matrix(10000*(counts / np.sum(counts, axis=1).A1[:,None]))
-
-
 def um_to_pixels(
         arr: Union[
         np.typing.ArrayLike,        # covers list, tuple, np.ndarray
@@ -209,229 +269,7 @@ def um_to_pixels(
     arr = np.asarray(arr, dtype=float)  # safely converts most array-like
     return np.round(arr / pixel_size).astype(int)
 
-def create_bins(df, bin_size=5):
-    """
-    Create bin edges transcript-level data for rasterization.
-
-    Parameters:
-    - df: DataFrame containing 'x_location' and 'y_location' columns. Usually read from transcripts.parquet.
-    - bin_size: size of the bins.
-    Returns:
-    - x_edges: array of bin edges for x coordinates.
-    - y_edges: array of bin edges for y coordinates.
-    """
-
-    # Determine the range of x and y values
-    x_min, x_max = df['x_location'].min(), df['x_location'].max()
-    y_min, y_max = df['y_location'].min(), df['y_location'].max()
-
-    # Create bin edges (ensure the max value is included)
-    x_edges = np.arange(x_min, x_max + bin_size, bin_size)
-    y_edges = np.arange(y_min, y_max + bin_size, bin_size)
-    return x_edges, y_edges
-
-def bin_expression(df, bin_size=5, normalize=False):
-    """
-    Bin the transcript data into a 2D histogram.
-    Parameters:
-    - df: DataFrame containing 'x_location' and 'y_location' columns. Usually read from transcripts.parquet.
-    - bin_size: size of the bins for rasterization.
-    - normalize: if True, normalize the counts to [0, 1].
-    Returns:
-    - counts: 2D numpy array representing the binned counts.
-    """
-    # Create bins
-    x_edges, y_edges = create_bins(df, bin_size=bin_size)
-
-    # Bin the data into a 2D histogram:
-    # Each bin counts the number of transcripts whose (x,y) fall into that bin.
-    # For some reason, I need to make the histogram with the y axis first followed by the x axis
-    counts, _, _ = np.histogram2d(df['y_location'], df['x_location'], bins=[y_edges, x_edges])
-    if normalize:
-        counts = counts / counts.max() if counts.max() > 0 else counts
-
-    return counts
-
-def create_binned_image(df, 
-    bin_size=5, 
-    colormap='Grays', 
-    return_array=False,
-    vmax=None,
-    vmin=None):
-    """
-    Create a binned image from transcript data.
-    Parameters:
-    - df: DataFrame containing transcript data with 'x_location' and 'y_location' columns.
-    - bin_size: size of the bins for rasterization.
-    - colormap: colormap to use for the image.
-    - return_array: if True, return the image array as well.
-    - vmax: maximum value for normalization (optional).
-    - vmin: minimum value for normalization (optional).
-    Returns:
-    - img: a PIL Image object representing the rasterized data.
-    - img_array: the image array if return_array is True.
-    """
-
-    from PIL import Image
-    x_edges, y_edges = create_bins(df, bin_size=bin_size)
-
-    # Bin the data into a 2D histogram:
-    # Each bin counts the number of transcripts whose (x,y) fall into that bin.
-    # For some reason, I need to make the histogram with the y axis first followed by the x axis
-    counts, _, _ = np.histogram2d(df['y_location'], df['x_location'], bins=[y_edges, x_edges])
-
-    if vmin is None:
-        vmin = 0
-    if vmax is None:
-        vmax = counts.max()
-        
-    if (vmax is not None) or (vmin is not None):
-        # Normalize counts to [vmin, vmax]
-        counts = np.clip(counts, vmin, vmax)
-        norm_counts = (counts - vmin) / (vmax - vmin)
-    else:
-        # Normalize counts to [0, 1]
-        norm_counts = counts / counts.max() if counts.max() > 0 else counts
-    
-
-    # Normalize the counts to [0,1]. If counts.max() is 0, leave as is.
-    #norm_counts = counts / counts.max() if counts.max() > 0 else counts
-
-    # apply colormap
-    #colormap = 'viridis'
-    colormap = pl.get_cmap(colormap)
-    colored_img = colormap(norm_counts)
-
-    # Convert to unsigned 8-bit for PIL compatibility
-    img_array = (colored_img[:, :, :3] * 255).astype(np.uint8)
-
-    # Scale normalized counts to [0,255] and convert to unsigned 8-bit for PIL compatibility.
-    #img_array = (norm_counts * 255).astype(np.uint8)
-
-    img = Image.fromarray(np.uint8(img_array))
-    
-    if return_array:
-        return img, img_array
-    else:
-        return img
-
-def create_polygon(df):
-    from shapely.geometry import Polygon
-    """
-    Create a polygon from the cell boundary data.
-    The DataFrame should contain 'vertex_x' and 'vertex_y' columns.
-    """
-    return Polygon(zip(df.vertex_x, df.vertex_y))
-
-def import_segmentation_xenium_parquet(boundaries_file):
-    """
-    Import cell boundaries from a Xenium cell_boundaries.parquet file
-    Returns a GeoDataFrame with cell polygons.
-    """
-    import geopandas as gpd
-    boundaries_df = pd.read_parquet(boundaries_file)
-    boundaries_df.set_index('cell_id', inplace=True)
-    boundaries_df.index = boundaries_df.index.astype('str')
-
-    cell_boundaries = gpd.GeoDataFrame(
-                boundaries_df\
-                    .groupby('cell_id')\
-                    .apply(create_polygon), columns=['geometry'])
-    return cell_boundaries
-
-
-def import_segmentation_xenium_zarr(cells_zarr_file, kind: Literal['cell', 'nucleus']='cell'):
-    """
-    Import cell or nucleus boundary polygons from `cells.zarr.zip`.
-
-    Polygons are stored in physical space under `/polygon_sets`, with:
-    - set `0` = nucleus
-    - set `1` = cell
-    """
-    import geopandas as gpd
-    import zarr
-    from shapely.geometry import Polygon
-
-    set_idx = '1' if kind == 'cell' else '0'
-    store = zarr.storage.ZipStore(cells_zarr_file, mode='r')
-    try:
-        root = _open_zarr_group_compat(zarr, store, mode='r', force_v2=True)
-        cell_ids_raw = root['cell_id'][:]
-        cell_ids = _encode_xenium_cell_ids(cell_ids_raw[:, 0], cell_ids_raw[:, 1]).astype(str)
-
-        grp = root[f'polygon_sets/{set_idx}']
-        cell_index = grp['cell_index'][:].astype(np.int64)
-        num_vertices = grp['num_vertices'][:].astype(np.int64)
-        vertices = grp['vertices'][:]
-    finally:
-        store.close()
-
-    geometries = {}
-    for i, (idx, nverts) in enumerate(zip(cell_index, num_vertices)):
-        if nverts <= 0:
-            continue
-        flat = vertices[i, : 2 * int(nverts)]
-        coords = flat.reshape(-1, 2)
-        if len(coords) < 4:
-            continue
-        geometries[str(cell_ids[idx])] = Polygon(coords)
-
-    gdf = gpd.GeoDataFrame(
-        {"geometry": pd.Series(geometries, dtype=object)},
-        geometry="geometry",
-    )
-    gdf.index.name = "cell_id"
-    return gdf
-
-
-class LazyBoundaryGeoDataFrame:
-    """
-    Deferred boundary loader that materializes a GeoDataFrame on first access.
-    """
-
-    def __init__(self, loader, label: str = "boundaries"):
-        self._loader = loader
-        self._label = label
-        self._data = None
-
-    def _materialize(self):
-        if self._data is None:
-            self._data = self._loader()
-        return self._data
-
-    def __getattr__(self, name):
-        return getattr(self._materialize(), name)
-
-    def __getitem__(self, key):
-        return self._materialize()[key]
-
-    def __len__(self):
-        return len(self._materialize())
-
-    def __iter__(self):
-        return iter(self._materialize())
-
-    def __repr__(self):
-        if self._data is None:
-            return f"LazyBoundaryGeoDataFrame({self._label}, unloaded)"
-        return repr(self._data)
-
-"""
-if os.path.exists(cell_boundaries_file):
-            print('Reading in cell boundaries')
-            # Read in cell boundaries
-            self.cell_boundaries = pd.read_parquet(cell_boundaries_file)
-            self.cell_boundaries.set_index('cell_id', inplace=True)
-            self.cell_boundaries.index = self.cell_boundaries.index.astype('str')
-            # Flip the y-coordinates to match the Xenium Ranger orientation
-            #self.cell_boundaries['vertex_y'] = -(self.cell_boundaries['vertex_y'] - self.cell_boundaries['vertex_y'].max())
-            self.cell_boundaries = gpd.GeoDataFrame(
-                self.cell_boundaries\
-                    .groupby('cell_id')\
-                    .apply(create_polygon), columns=['geometry'])
-"""    
-
-def read_xenium_to_anndata(xenium_output_folder):
+def read_xenium_to_anndata(xenium_output_folder, include_non_gene_features=False):
     xdir = xenium_output_folder
     #print(xdir)
     # Choose which file to load the cell feature matrix from
@@ -441,6 +279,25 @@ def read_xenium_to_anndata(xenium_output_folder):
     except FileNotFoundError:
         if os.path.exists(f'{xdir}/cell_feature_matrix/'):
             adata = sc.read_10x_mtx(f'{xdir}/cell_feature_matrix/', gex_only=False)
+
+    feature_names = pd.Index(adata.var_names.astype(str))
+    total_mask = feature_names == "Total transcripts"
+    if total_mask.any():
+        total_idx = np.flatnonzero(total_mask)[0]
+        total_values = adata.X[:, total_idx]
+        if hasattr(total_values, "toarray"):
+            total_values = total_values.toarray()
+        adata.obs["total_transcripts"] = np.asarray(total_values).ravel().astype(np.int64)
+
+    if "feature_types" in adata.var:
+        feature_types = adata.var["feature_types"].astype(str).str.lower()
+        gene_mask = feature_types.isin(["gene", "gene expression"]).to_numpy()
+    else:
+        gene_mask = ~feature_names.str.contains("codeword|controlprobe|control_codeword", case=False, regex=True)
+
+    keep_features = ~total_mask if include_non_gene_features else (gene_mask & ~total_mask)
+    if not keep_features.all():
+        adata = adata[:, np.asarray(keep_features)].copy()
 
     # Read in cell-level metadata
     cells = pd.read_parquet(f'{xdir}/cells.parquet')
@@ -485,7 +342,7 @@ def read_xenium_to_anndata(xenium_output_folder):
     ### Start Scanpy Pipeline
     # Stash matrix layers
     adata.layers['counts'] = adata.X.astype('int').copy()
-    adata.layers['TP10K'] = to_TP10k(adata.layers['counts'] ).astype('float32')
+    adata.layers['TP10K'] = normalize_tp10k(adata.layers['counts'], log1p=True).astype('float32')
     adata.X = adata.layers['TP10K'].copy()
 
     # Compute QC metrics
@@ -577,211 +434,6 @@ def read_xen_essentials(xenium_folder, verbose = True):
     #return celldata, trans, nuc, clusters, gene_panel
 
 
-def _read_zarr_adata(folder, verbose=True):
-    """
-    Build an AnnData object from the zarr-format cell feature matrix and cell summaries.
-
-    Sources
-    -------
-    cell_feature_matrix.zarr.zip
-        CSC expression matrix (features × cells), gene names, cell IDs.
-    cells.zarr.zip
-        cell_summary array with centroid XY, area, and nucleus metrics.
-
-    Returns
-    -------
-    anndata.AnnData of shape (n_cells, n_features) with:
-        obs  : x_centroid, y_centroid, cell_area, nucleus_centroid_x/y, nucleus_area
-        var  : gene_ids, feature_types
-        obsm : 'spatial' = [[x_centroid, y_centroid], ...]
-    """
-    import anndata as ad, zarr
-    from scipy import sparse
-
-    cfm_path   = os.path.join(folder, 'cell_feature_matrix.zarr.zip')
-    cells_path = os.path.join(folder, 'cells.zarr.zip')
-
-    # ── Expression matrix (CSC: features × cells) ────────────────────
-    if verbose:
-        print('  Loading expression matrix from cell_feature_matrix.zarr.zip...',
-              end=' ', flush=True)
-    store_cfm = zarr.storage.ZipStore(cfm_path, mode='r')
-    try:
-        grp_cfm = _open_zarr_group_compat(zarr, store_cfm, mode='r', force_v2=True)
-        cf = grp_cfm['cell_features']
-
-        csc_data    = cf['csc/data'][:]            # uint32
-        csc_indices = cf['csc/indices'][:].astype(np.int32)  # uint16 feature ids → int32
-        csc_indptr  = cf['csc/indptr'][:]          # uint32 cell pointers
-
-        n_features  = int(cf['indptr'].shape[0]) - 1   # from CSR indptr shape
-        n_cells     = int(csc_indptr.shape[0]) - 1
-
-        # CSC (features × cells) → transpose to CSR (cells × features)
-        X = sparse.csc_matrix(
-            (csc_data, csc_indices, csc_indptr),
-            shape=(n_features, n_cells),
-        ).T.tocsr()
-
-        cfm_cell_ids_raw = cf['cell_id'][:]
-        cfm_cell_ids = cfm_cell_ids_raw[:, 0]  # integer prefix used for alignment
-    finally:
-        store_cfm.close()
-
-    if verbose:
-        print(f'done. ({n_cells:,} cells × {n_features:,} features)')
-
-    # ── Gene metadata ─────────────────────────────────────────────────
-    import zipfile, json
-    with zipfile.ZipFile(cfm_path) as zf:
-        attrs = json.loads(zf.read('cell_features/.zattrs').decode())
-    var = pd.DataFrame({
-        'gene_ids':      attrs['feature_ids'],
-        'feature_types': attrs['feature_types'],
-    }, index=pd.Index(attrs['feature_keys'], name=''))
-
-    # ── Cell spatial metadata ─────────────────────────────────────────
-    if verbose:
-        print('  Loading cell summaries from cells.zarr.zip...', end=' ', flush=True)
-    store_cells = zarr.storage.ZipStore(cells_path, mode='r')
-    try:
-        grp_cells = _open_zarr_group_compat(zarr, store_cells, mode='r', force_v2=True)
-        cell_summary = grp_cells['cell_summary'][:]   # (n_cells, 8)
-        cells_ids    = grp_cells['cell_id'][:, 0]     # integer prefix used for alignment
-    finally:
-        store_cells.close()
-
-    if verbose:
-        print('done.')
-
-    # Align cell_summary rows to CFM cell ordering by cell_id
-    id_to_row = {int(cid): i for i, cid in enumerate(cells_ids)}
-    summary_order = np.array([id_to_row.get(int(cid), -1) for cid in cfm_cell_ids])
-    missing = (summary_order == -1).sum()
-    if missing:
-        # Fill missing rows with NaN-equivalent zeros
-        summary_aligned = np.where(
-            (summary_order[:, None] >= 0),
-            cell_summary[np.clip(summary_order, 0, len(cell_summary) - 1)],
-            np.nan,
-        )
-    else:
-        summary_aligned = cell_summary[summary_order]
-
-    # ── Build AnnData ─────────────────────────────────────────────────
-    obs_index = pd.Index(
-        _encode_xenium_cell_ids(cfm_cell_ids_raw[:, 0], cfm_cell_ids_raw[:, 1]),
-        name='cell_id',
-    )
-    # cell_summary columns: cell_centroid_x, cell_centroid_y, cell_area,
-    #                        nucleus_centroid_x, nucleus_centroid_y, nucleus_area,
-    #                        z_level, nucleus_count
-    obs = pd.DataFrame({
-        'x_centroid':         summary_aligned[:, 0],
-        'y_centroid':         summary_aligned[:, 1],
-        'cell_area':          summary_aligned[:, 2],
-        'nucleus_centroid_x': summary_aligned[:, 3],
-        'nucleus_centroid_y': summary_aligned[:, 4],
-        'nucleus_area':       summary_aligned[:, 5],
-    }, index=obs_index)
-
-    adata = ad.AnnData(X=X, obs=obs, var=var)
-    adata.obsm['spatial'] = summary_aligned[:, :2].astype(np.float32)
-
-    return adata
-
-
-def _read_analysis_zarr(folder, verbose=True):
-    """
-    Build a clusters DataFrame from analysis.zarr.zip.
-
-    The file contains one or more cell groupings (graph clustering, k-means at
-    various resolutions).  Each grouping stores its membership in a sparse
-    indptr/indices format where indices are *positional* row numbers into the
-    cells.zarr.zip cell_id array.
-
-    Parameters
-    ----------
-    folder : str
-        Xenium / Atera output folder containing analysis.zarr.zip and
-        cells.zarr.zip.
-    verbose : bool
-
-    Returns
-    -------
-    pd.DataFrame
-        Index  : cell_id as str.
-        Columns: one per grouping.  The graph-clustering column is named
-                 ``'Cluster'`` (matching the parquet-path convention).  k-means
-                 columns are named ``'kmeans_N_clusters'``.
-        Values : cluster label strings (e.g. ``'Cluster 1'``), NaN for any
-                 cell that does not appear in the grouping.
-    """
-    import zarr
-
-    analysis_path = os.path.join(folder, 'analysis.zarr.zip')
-    cells_path    = os.path.join(folder, 'cells.zarr.zip')
-
-    if not os.path.exists(analysis_path):
-        return pd.DataFrame()
-
-    if verbose:
-        print('  Loading cluster assignments from analysis.zarr.zip...', end=' ', flush=True)
-
-    # ── 1. Read positional cell_id lookup from cells.zarr.zip ─────────────
-    store_cells = zarr.storage.ZipStore(cells_path, mode='r')
-    try:
-        grp_cells = _open_zarr_group_compat(zarr, store_cells, mode='r', force_v2=True)
-        cell_ids_raw  = grp_cells['cell_id'][:]
-        cell_ids      = cell_ids_raw[:, 0].astype(np.int64)   # integer prefix for positional lookup
-    finally:
-        store_cells.close()
-
-    # ── 2. Read groupings ─────────────────────────────────────────────────
-    store_an = zarr.storage.ZipStore(analysis_path, mode='r')
-    try:
-        grp_an = _open_zarr_group_compat(zarr, store_an, mode='r', force_v2=True)
-        attrs  = dict(grp_an['cell_groups'].attrs)
-        grouping_names = attrs['grouping_names']   # list of str
-        group_names    = attrs['group_names']      # list of list of str
-
-        columns = {}
-        for k, (grp_name, clust_labels) in enumerate(zip(grouping_names, group_names)):
-            indptr  = grp_an[f'cell_groups/{k}/indptr'][:]   # (n_clusters+1,)
-            indices = grp_an[f'cell_groups/{k}/indices'][:]  # positional into cell_ids
-
-            # Build cell_id_int → cluster_label mapping
-            assignment = np.empty(len(cell_ids), dtype=object)
-            assignment[:] = np.nan
-            for ci, label in enumerate(clust_labels):
-                pos = indices[indptr[ci]:indptr[ci + 1]]
-                assignment[pos] = label
-
-            # Column name: 'Cluster' for graphclust, 'kmeans_N_clusters' for others
-            if 'graphclust' in grp_name:
-                col_name = 'Cluster'
-            else:
-                col_name = grp_name.replace('gene_expression_', '')
-
-            columns[col_name] = assignment
-    finally:
-        store_an.close()
-
-    # ── 3. Build DataFrame indexed by encoded Xenium cell_id ─────────────
-    df = pd.DataFrame(columns, index=pd.Index(
-        _encode_xenium_cell_ids(cell_ids_raw[:, 0], cell_ids_raw[:, 1]), name='cell_id'
-    ))
-    if 'Cluster' in df.columns:
-        df['Cluster'] = df['Cluster'].astype('str').astype('category')
-
-    if verbose:
-        n_clust = df['Cluster'].nunique() if 'Cluster' in df.columns else 0
-        print(f'done. ({n_clust} graph clusters, {len(df):,} cells, '
-              f'{len(df.columns)} groupings)')
-
-    return df
-
-
 def frame(transcripts_df):
     xmin,xmax = transcripts_df['x_location'].min(),transcripts_df['x_location'].max()
     ymin,ymax = transcripts_df['y_location'].min(),transcripts_df['y_location'].max()
@@ -849,7 +501,8 @@ class XenData:
                  transcript_source: Literal['auto', 'zarr', 'parquet']='auto',
                  eager_transcript_threshold: int=20_000_000,
                  boundary_source: Literal['auto', 'parquet', 'zarr']='auto',
-                 lazy_boundaries: bool=False):
+                 lazy_boundaries: bool=False,
+                 include_non_gene_features: bool=False):
         self.xenium_folder = xenium_folder
         self.cache_threshold = cache_threshold
         self.eager_transcript_threshold = int(eager_transcript_threshold)
@@ -902,7 +555,11 @@ class XenData:
 
             panel_file = os.path.join(xenium_folder, 'gene_panel.json')
             self.gene_panel = read_xen_panel(panel_file) if os.path.exists(panel_file) else None
-            self.adata      = _read_zarr_adata(xenium_folder, verbose=verbose)
+            self.adata      = _read_zarr_adata(
+                xenium_folder,
+                verbose=verbose,
+                include_non_gene_features=include_non_gene_features,
+            )
             self.clusters   = _read_analysis_zarr(xenium_folder, verbose=verbose)
             if len(self.clusters):
                 self.adata.obs = self.adata.obs.merge(
@@ -913,7 +570,10 @@ class XenData:
 
             if verbose:
                 print('Reading in AnnData object')
-            self.adata = read_xenium_to_anndata(xenium_folder)
+            self.adata = read_xenium_to_anndata(
+                xenium_folder,
+                include_non_gene_features=include_non_gene_features,
+            )
 
             self.adata.obs = self.adata.obs.merge(
                 self.clusters, left_index=True, right_index=True, how='left')
@@ -952,23 +612,11 @@ class XenData:
         if resolved_boundary_source == 'parquet':
             if verbose:
                 print('Reading in cell boundaries')
-            self.cell_boundaries = pd.read_parquet(cell_boundaries_file)
-            self.cell_boundaries.set_index('cell_id', inplace=True)
-            self.cell_boundaries.index = self.cell_boundaries.index.astype('str')
-            self.cell_boundaries = gpd.GeoDataFrame(
-                self.cell_boundaries
-                    .groupby('cell_id')
-                    .apply(create_polygon), columns=['geometry'])
+            self.cell_boundaries = import_segmentation_xenium_parquet(cell_boundaries_file)
 
             if verbose:
                 print('Reading in nucleus boundaries')
-            self.nucleus_boundaries = pd.read_parquet(nuc_boundaries_file)
-            self.nucleus_boundaries.set_index('cell_id', inplace=True)
-            self.nucleus_boundaries.index = self.nucleus_boundaries.index.astype('str')
-            self.nucleus_boundaries = gpd.GeoDataFrame(
-                self.nucleus_boundaries
-                    .groupby('cell_id')
-                    .apply(create_polygon), columns=['geometry'])
+            self.nucleus_boundaries = import_segmentation_xenium_parquet(nuc_boundaries_file)
         elif resolved_boundary_source == 'zarr':
             if lazy_boundaries:
                 if verbose:
@@ -1015,6 +663,11 @@ class XenData:
         self.protein_images = _detect_linked_protein_images(xenium_folder)
         if self.protein_images is not None:
             self.images['Protein'] = self.protein_images['folder']
+            if 'DAPI' not in self.images:
+                channel_names = self.protein_images.get('channel_names', [])
+                dapi_matches = [i for i, name in enumerate(channel_names) if str(name).upper() == 'DAPI']
+                if dapi_matches:
+                    self.images['DAPI'] = self.protein_images['files'][dapi_matches[0]]
 
         if roi_file is not None:
             if verbose:
@@ -1311,7 +964,7 @@ class XenData:
             
             x, y = cell_coords[:,0], cell_coords[:,1]
             fig_scale = 4
-            fig, ax = pl.subplots(figsize=[fig_scale, fig_scale * self.aspect_ratio])
+            fig, ax = plt.subplots(figsize=[fig_scale, fig_scale * self.aspect_ratio])
             ax.scatter(x, y, s=1, color='white', alpha=0.1)
             ax.set_facecolor('black')
 
@@ -1331,7 +984,7 @@ class XenData:
             ax.invert_yaxis()
             ax.set_xticks([])
             ax.set_yticks([])
-            pl.show()
+            plt.show()
 
         return roi_names
 
@@ -1512,155 +1165,19 @@ class XenData:
 
         The resulting directory can be opened directly in the Xenium Explorer
         desktop application and is re-readable by ``XenData(output_dir)``.
-
-        Parameters
-        ----------
-        output_dir : str or Path
-            Destination directory (created if absent).
-        include_morphology : bool
-            Include ``morphology.ome.tif``.  Requires ``tifffile``.
-        crop_morphology : bool
-            Crop to the active ROI bounding box when an ROI is active.
-        rebase_coordinates : bool
-            Shift spatial coordinates so the ROI crop origin becomes (0, 0).
-        pyramidal_morphology : bool
-            Write a multi-resolution pyramidal OME-TIFF.
-        pyramid_scale : int
-            Downsampling factor between pyramid levels.
-        morphology_tile : tuple[int, int]
-            Tile size (width, height) for the pyramidal OME-TIFF.
-        overwrite : bool
-            Overwrite an existing output directory.
-        verbose : bool
         """
-        import importlib.util
-        from pathlib import Path as _Path
-
-        # Load helper module by absolute file path — avoids package-resolution
-        # issues when xentools is run from within its own directory.
-        _helper_path = _Path(__file__).parent / "io_utils" / "_write_explorer.py"
-        _spec = importlib.util.spec_from_file_location("_write_explorer", _helper_path)
-        _we = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_we)
-
-        outdir = _Path(output_dir)
-        if outdir.exists() and not overwrite:
-            raise FileExistsError(
-                f"Output directory already exists: {outdir}\n"
-                "Pass overwrite=True to replace it."
-            )
-        outdir.mkdir(parents=True, exist_ok=True)
-
-        crop_origin = _export_crop_origin_um(self) if rebase_coordinates else (0.0, 0.0)
-
-        if verbose:
-            print("  Collecting transcripts...", end=" ", flush=True)
-        trans_df = _we._materialize_transcripts(self)
-        trans_df = _rebase_spatial_dataframe(trans_df, crop_origin)
-        n_transcripts = len(trans_df)
-        trans_df.to_parquet(outdir / "transcripts.parquet", index=False)
-        if verbose:
-            print(f"done. ({n_transcripts:,} rows)")
-
-        if verbose:
-            print("  Writing cells.parquet...", end=" ", flush=True)
-        cells_df = _prepare_cells_dataframe(self)
-        cells_df = _rebase_spatial_dataframe(cells_df, crop_origin)
-        cells_df.to_parquet(outdir / "cells.parquet", index=False)
-        if verbose:
-            print(f"done. ({len(cells_df):,} cells)")
-
-        if verbose:
-            print("  Writing boundary parquets...", end=" ", flush=True)
-        _cell_bdf = _prepare_boundary_dataframe(self, boundary_kind="cell")
-        _cell_bdf = _rebase_spatial_dataframe(_cell_bdf, crop_origin)
-        _cell_bdf.to_parquet(outdir / "cell_boundaries.parquet", index=False)
-        _nuc_bdf = _prepare_boundary_dataframe(self, boundary_kind="nucleus")
-        _nuc_bdf = _rebase_spatial_dataframe(_nuc_bdf, crop_origin)
-        _nuc_bdf.to_parquet(outdir / "nucleus_boundaries.parquet", index=False)
-        if verbose:
-            print("done.")
-
-        if verbose:
-            print("  Writing cell_feature_matrix/...", end=" ", flush=True)
-        _we._write_compressed_mex(self.adata, outdir)
-        if verbose:
-            print(f"done. ({self.adata.n_obs:,} cells × {self.adata.n_vars:,} features)")
-
-        if verbose:
-            print("  Writing analysis/...", end=" ", flush=True)
-        _we._write_analysis_directory(self, outdir)
-        if verbose:
-            print("done.")
-
-        _panel_src = os.path.join(self.xenium_folder, "gene_panel.json")
-        if os.path.exists(_panel_src):
-            shutil.copy2(_panel_src, outdir / "gene_panel.json")
-
-        if verbose:
-            print("  Writing cells.zarr.zip...", end=" ", flush=True)
-        _obs_names = self.adata.obs_names.astype(str).tolist()
-        _pixel_size = float(self.xenium_metadata.get("pixel_size", 0.2125))
-        _we._write_cells_zarr(_obs_names, cells_df, _cell_bdf, _nuc_bdf, outdir,
-                               pixel_size=_pixel_size)
-        if verbose:
-            print("done.")
-
-        if verbose:
-            print("  Writing cell_feature_matrix.zarr.zip...", end=" ", flush=True)
-        _we._write_cfm_zarr(self.adata, _obs_names, outdir)
-        if verbose:
-            print("done.")
-
-        if verbose:
-            print("  Writing analysis.zarr.zip...", end=" ", flush=True)
-        _we._write_analysis_zarr(self.adata, _obs_names, outdir)
-        if verbose:
-            print("done.")
-
-        if verbose:
-            print("  Writing transcripts.zarr.zip...", end=" ", flush=True)
-        _source_fov_names = _we._load_source_fov_names(self)
-        _we._write_transcripts_zarr(trans_df, outdir, fov_names=_source_fov_names)
-        if verbose:
-            print(f"done. ({n_transcripts:,} transcripts)")
-
-        _xenium_explorer_files = {
-            "cells_zarr_filepath": "cells.zarr.zip",
-            "cell_features_zarr_filepath": "cell_feature_matrix.zarr.zip",
-            "analysis_zarr_filepath": "analysis.zarr.zip",
-            "transcripts_zarr_filepath": "transcripts.zarr.zip",
-        }
-
-        if verbose:
-            print("  Writing experiment.xenium...", end=" ", flush=True)
-        _we._write_experiment_xenium(
-            self, outdir, n_transcripts=n_transcripts,
-            xenium_explorer_files=_xenium_explorer_files,
+        return _write_xenium_explorer_bundle(
+            self,
+            output_dir,
+            include_morphology=include_morphology,
+            crop_morphology=crop_morphology,
+            rebase_coordinates=rebase_coordinates,
+            pyramidal_morphology=pyramidal_morphology,
+            pyramid_scale=pyramid_scale,
+            morphology_tile=morphology_tile,
+            overwrite=overwrite,
+            verbose=verbose,
         )
-        if verbose:
-            print("done.")
-
-        if include_morphology:
-            _morph_src = os.path.join(self.xenium_folder, "morphology.ome.tif")
-            if os.path.exists(_morph_src):
-                if verbose:
-                    print("  Writing morphology.ome.tif...", end=" ", flush=True)
-                _write_morphology_for_slice(
-                    self,
-                    output_path=outdir / "morphology.ome.tif",
-                    crop=crop_morphology,
-                    pyramidal=pyramidal_morphology,
-                    pyramid_scale=pyramid_scale,
-                    tile=morphology_tile,
-                )
-                if verbose:
-                    print("done.")
-            elif verbose:
-                print("  morphology.ome.tif not found — skipping.")
-
-        if verbose:
-            print(f"\nXenium Explorer bundle written to: {outdir}")
 
     def write_geo_submission(self,
                              output_dir,
@@ -1693,70 +1210,20 @@ class XenData:
         - Detected linked protein images in ``morphology_focus`` can also be exported.
         - Spatial tables are rebased to the subset image origin by default.
         """
-        from pathlib import Path
-
-        if matrix_format.lower() != "mex":
-            raise ValueError("Only matrix_format='mex' is currently supported.")
-
-        outdir = Path(output_dir)
-        outdir.mkdir(parents=True, exist_ok=True)
-
-        required_outputs = [
-            outdir / "transcripts.parquet",
-            outdir / "barcodes.tsv",
-            outdir / "features.tsv",
-            outdir / "matrix.mtx",
-            outdir / "cells.parquet",
-            outdir / "cell_boundaries.parquet",
-            outdir / "nucleus_boundaries.parquet",
-        ]
-        if include_morphology:
-            required_outputs.append(outdir / "morphology.ome.tif")
-        if include_protein_images and self.protein_images is not None:
-            required_outputs.extend(outdir / "morphology_focus" / name for name in self.protein_images["filenames"])
-
-        existing = [path for path in required_outputs if path.exists()]
-        if existing and not overwrite:
-            existing_str = ", ".join(path.name for path in existing)
-            raise FileExistsError(f"Refusing to overwrite existing output files: {existing_str}")
-
-        crop_origin_um = _export_crop_origin_um(self) if rebase_coordinates else (0.0, 0.0)
-
-        transcripts_df = _rebase_spatial_dataframe(self.trans, crop_origin_um)
-        transcripts_df.to_parquet(outdir / "transcripts.parquet", index=False)
-
-        cells_df = _prepare_cells_dataframe(self)
-        cells_df = _rebase_spatial_dataframe(cells_df, crop_origin_um)
-        cells_df.to_parquet(outdir / "cells.parquet", index=False)
-
-        cell_boundary_df = _prepare_boundary_dataframe(self, boundary_kind="cell")
-        cell_boundary_df = _rebase_spatial_dataframe(cell_boundary_df, crop_origin_um)
-        cell_boundary_df.to_parquet(outdir / "cell_boundaries.parquet", index=False)
-
-        nucleus_boundary_df = _prepare_boundary_dataframe(self, boundary_kind="nucleus")
-        nucleus_boundary_df = _rebase_spatial_dataframe(nucleus_boundary_df, crop_origin_um)
-        nucleus_boundary_df.to_parquet(outdir / "nucleus_boundaries.parquet", index=False)
-
-        _write_10x_mex(self.adata, outdir)
-
-        if include_morphology:
-            _write_morphology_for_slice(
-                self,
-                output_path=outdir / "morphology.ome.tif",
-                crop=crop_morphology,
-                pyramidal=pyramidal_morphology,
-                pyramid_scale=pyramid_scale,
-                tile=morphology_tile,
-            )
-
-        if include_protein_images and self.protein_images is not None:
-            _write_protein_images_for_slice(
-                self,
-                output_dir=outdir / "morphology_focus",
-                crop=crop_protein_images,
-                pyramid_scale=pyramid_scale,
-                tile=morphology_tile,
-            )
+        return _write_geo_submission_bundle(
+            self,
+            output_dir,
+            matrix_format=matrix_format,
+            include_morphology=include_morphology,
+            crop_morphology=crop_morphology,
+            include_protein_images=include_protein_images,
+            crop_protein_images=crop_protein_images,
+            rebase_coordinates=rebase_coordinates,
+            pyramidal_morphology=pyramidal_morphology,
+            pyramid_scale=pyramid_scale,
+            morphology_tile=morphology_tile,
+            overwrite=overwrite,
+        )
 
     def rasterize(self, 
         features=None, 
@@ -1779,51 +1246,16 @@ class XenData:
         Returns:
         - img: a PIL Image object representing the rasterized data.
         """
-        from PIL import Image
-        # Check if features is None or a string, and convert to list if necessary
-        if features is None:
-            features = self.features
-            title = 'All Features'
-        elif isinstance(features, str):
-            features = [features]
-
-        toplot = self.trans[self.trans['feature_name'].isin(features)]
-        
-        for feature in features:
-            if feature not in self.features:
-                features.remove(feature)
-                print(f'Feature "{feature}" not found in the dataset. Skipping...')
-
-        if len(features) == 0:
-            print('No valid features found in the dataset. Exiting...')
-            return None
-             
-        img = create_binned_image(toplot, 
-            bin_size=bin_size, 
+        return _pl_namespace.rasterize(
+            self,
+            features=features,
+            bin_size=bin_size,
             colormap=colormap,
             vmax=vmax,
-            vmin=vmin)
-        
-        w,h = img.size
-        ar = w/h
-        dpi = pl.rcParams['figure.dpi']
-
-        if return_img:
-            return img
-        else:
-            pl.figure(figsize=(w/dpi, h/dpi), dpi=dpi)
-            pl.imshow(img, cmap=colormap)
-            pl.axis('off')
-
-            if title == '':
-                if len(features) < 3:
-                    title = ', '.join(features)
-                else:
-                    title = ', '.join(features[:3]) + '...'
-
-            pl.title(title, fontsize=12)
-            pl.tight_layout()
-            pl.show()
+            vmin=vmin,
+            title=title,
+            return_img=return_img,
+        )
 
     def show_image(self,
                    channel: str = 'DAPI',
@@ -1910,7 +1342,7 @@ class XenData:
             if self.protein_images is None:
                 raise ValueError(
                     "No protein images found for this dataset. "
-                    "Expected a 'morphology_focus' folder with ch*.ome.tif files."
+                    "Expected a 'morphology_focus' folder with linked OME-TIFF files."
                 )
             channel_names = self.protein_images['channel_names']
             if channel not in channel_names:
@@ -2086,7 +1518,7 @@ class XenData:
                 rgba = np.zeros((*disp.shape[:2], 4), dtype=np.float32)
                 rgba[..., :3] = disp[..., :3]
             else:
-                rgba = pl.get_cmap(splat_cmap)(disp[..., 0]).astype(np.float32)
+                rgba = plt.get_cmap(splat_cmap)(disp[..., 0]).astype(np.float32)
                 signal = disp[..., 0]
             rgba[..., 3] = np.clip(signal * splat_alpha, 0, 1)
             ax.images[-1].set_data(rgba)
@@ -2148,134 +1580,21 @@ class XenData:
         -------
         ax : matplotlib Axes
         """
-        from matplotlib.patches import Polygon as MplPolygon
-        from matplotlib.collections import PatchCollection
-        import matplotlib.colors as mcolors
-
-        gdf = self.cell_boundaries if kind == 'cell' else self.nucleus_boundaries
-        if gdf is None or len(gdf) == 0:
-            raise ValueError(
-                f"No {kind} boundaries loaded. "
-                "Check that boundary parquet files or cells.zarr.zip were available on init."
-            )
-
-        # ── spatial subset ────────────────────────────────────────────────────
-        if bounds is None and getattr(self, 'active_roi', None) is not None:
-            xmin, xmax, ymin, ymax = _roi_bounds_um(self.active_roi)
-        elif bounds is not None:
-            xmin, xmax, ymin, ymax = bounds
-        else:
-            xmin = ymin = xmax = ymax = None
-
-        if xmin is not None:
-            cx = gdf.geometry.centroid.x
-            cy = gdf.geometry.centroid.y
-            mask = (cx >= xmin) & (cx <= xmax) & (cy >= ymin) & (cy <= ymax)
-            gdf = gdf[mask]
-
-        if max_cells is not None and len(gdf) > max_cells:
-            gdf = gdf.sample(max_cells, random_state=0)
-
-        if len(gdf) == 0:
-            if ax is None:
-                _, ax = plt.subplots(figsize=figsize)
-            return ax
-
-        # ── build per-cell face colours ───────────────────────────────────────
-        if color_by is not None and self.adata is not None and color_by in self.adata.obs.columns:
-            obs_col = self.adata.obs[color_by].reindex(gdf.index)
-
-            # If IDs don't match (e.g. zarr int IDs vs parquet hash IDs), fall
-            # back to a nearest-centroid spatial join.
-            if obs_col.isna().all():
-                from scipy.spatial import KDTree
-                obs_sub = self.adata.obs[['x_centroid', 'y_centroid', color_by]].dropna(
-                    subset=['x_centroid', 'y_centroid'])
-                tree = KDTree(obs_sub[['x_centroid', 'y_centroid']].values)
-                bnd_cx = gdf.geometry.centroid.x.values
-                bnd_cy = gdf.geometry.centroid.y.values
-                _, nn_idx = tree.query(np.column_stack([bnd_cx, bnd_cy]))
-                obs_col = pd.Series(
-                    obs_sub[color_by].iloc[nn_idx].values,
-                    index=gdf.index,
-                )
-
-            categories = list(obs_col.cat.categories) if hasattr(obs_col, 'cat') \
-                         else sorted(obs_col.dropna().unique())
-            if palette is None:
-                palette = dict(zip(categories, generate_palette(len(categories))))
-            raw_colors = obs_col.astype(object).map(palette).fillna('gray').tolist()
-            face_rgba = [(*mcolors.to_rgb(c), face_alpha) for c in raw_colors]
-        else:
-            if facecolor == 'none':
-                face_rgba = [(0, 0, 0, 0)] * len(gdf)
-            else:
-                rgb = mcolors.to_rgb(facecolor)
-                face_rgba = [(*rgb, face_alpha)] * len(gdf)
-
-        edge_rgb  = mcolors.to_rgb(edgecolor)
-        edge_rgba = (*edge_rgb, edge_alpha)
-
-        # ── y-flip: match splat/show_image convention ─────────────────────────
-        # Both splat (y_idx = ymax - y) and show_ome_tiff (img[::-1]) display
-        # with physical y inverted: small y at top, large y at bottom.
-        # Reflect polygon vertices the same way: y_plot = y_lo + y_hi - y_phys.
-        if ax is not None:
-            y_lo, y_hi = ax.get_ylim()
-        elif xmin is not None:
-            y_lo, y_hi = ymin, ymax
-        else:
-            y_lo = gdf.geometry.bounds['miny'].min()
-            y_hi = gdf.geometry.bounds['maxy'].max()
-
-        def _flip_coords(coords):
-            arr = np.array(coords)
-            arr[:, 1] = y_lo + y_hi - arr[:, 1]
-            return arr
-
-        # ── build PatchCollection ─────────────────────────────────────────────
-        patches = []
-        for geom in gdf.geometry:
-            # Handle both Polygon and MultiPolygon
-            if geom.geom_type == 'Polygon':
-                polys = [geom]
-            else:
-                polys = list(geom.geoms)
-            for poly in polys:
-                patches.append(MplPolygon(_flip_coords(poly.exterior.coords), closed=True))
-
-        pc = PatchCollection(
-            patches,
-            facecolors=face_rgba,
-            edgecolors=[edge_rgba] * len(patches),
-            linewidths=linewidth,
+        return _pl_namespace.plot_boundaries(
+            self,
+            kind=kind,
+            color_by=color_by,
+            palette=palette,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            face_alpha=face_alpha,
+            edge_alpha=edge_alpha,
+            linewidth=linewidth,
+            bounds=bounds,
+            ax=ax,
+            figsize=figsize,
+            max_cells=max_cells,
         )
-
-        # ── draw ──────────────────────────────────────────────────────────────
-        if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
-            ax.set_aspect('equal')
-            ax.set_xlim(gdf.geometry.bounds['minx'].min(),
-                        gdf.geometry.bounds['maxx'].max())
-            ax.set_ylim(y_lo, y_hi)
-
-        ax.add_collection(pc)
-        ax.set_aspect('equal')
-
-        # ── legend when color_by is set ───────────────────────────────────────
-        if color_by is not None and palette is not None:
-            from matplotlib.patches import Patch
-            handles = [Patch(facecolor=(*mcolors.to_rgb(c), face_alpha),
-                             edgecolor=edge_rgba,
-                             label=str(k))
-                       for k, c in palette.items()
-                       if k in (obs_col.values if 'obs_col' in dir() else [])]
-            if handles:
-                ax.legend(handles=handles, fontsize='small',
-                          labelcolor='white', facecolor='black',
-                          edgecolor='black', loc='upper right')
-
-        return ax
 
     def plot_unassigned_transcripts(
         self,
@@ -2323,133 +1642,12 @@ class XenData:
 
         Save the binned AnnData object to the xdata object.
         """
-        import anndata as ad
-        from scipy.sparse import coo_matrix
-        print(f'Creating binned AnnData object with bin size of {bin_size}um...')
-
-        include_features = _normalize_feature_selection(
-            include_features,
-            self.features,
-            arg_name="include_features",
-        )
-
-        if isinstance(self.trans, LazyTranscripts):
-            bounds = None if self.subset_roi is None else self.subset_roi.bounds
-            parquet_path = os.path.join(self.xenium_folder, "transcripts.parquet")
-            need_metadata = exclude_unassigned or (distance_to_nucleus is not None)
-
-            use_parquet = False
-            parquet_columns = ["x_location", "y_location", "feature_name"]
-            if exclude_unassigned:
-                parquet_columns.append("cell_id")
-            if distance_to_nucleus is not None:
-                parquet_columns.append("nucleus_distance")
-
-            if need_metadata and os.path.exists(parquet_path):
-                try:
-                    import pyarrow.parquet as pq
-                    schema_names = set(pq.ParquetFile(parquet_path).schema.names)
-                    use_parquet = set(parquet_columns).issubset(schema_names)
-                except Exception:
-                    use_parquet = False
-
-            if use_parquet:
-                print("Using transcripts.parquet to preserve transcript metadata filters...")
-                df = pd.read_parquet(parquet_path, columns=parquet_columns)
-                if bounds is not None:
-                    df = df[
-                        (df["x_location"] >= bounds[0]) &
-                        (df["x_location"] <= bounds[1]) &
-                        (df["y_location"] >= bounds[2]) &
-                        (df["y_location"] <= bounds[3])
-                    ].copy()
-            else:
-                if need_metadata:
-                    print("Transcript metadata are unavailable in the lazy Zarr view; proceeding without them.")
-                df = self.trans.query(
-                    genes=include_features,
-                    quality='all',
-                    **(
-                        {}
-                        if bounds is None
-                        else dict(
-                            xmin=bounds[0],
-                            xmax=bounds[1],
-                            ymin=bounds[2],
-                            ymax=bounds[3],
-                        )
-                    ),
-                )
-        else:
-            df = self.trans.copy()
-
-        df = df[df['feature_name'].isin(include_features)].copy()
-
-        if exclude_unassigned:
-            if 'cell_id' in df.columns:
-                print('Using only transcripts assigned to cells/nuclei...')
-                df = df[df['cell_id'] != 'UNASSIGNED'].copy()
-            else:
-                print("Transcript cell assignments are unavailable; skipping exclude_unassigned filter.")
-
-        if distance_to_nucleus is not None:
-            if 'nucleus_distance' in df.columns:
-                print(f'Excluding transcripts further than {distance_to_nucleus}um from the nucleus...')
-                df = df[df['nucleus_distance'] <= distance_to_nucleus].copy()
-            else:
-                print("Transcript nucleus distances are unavailable; skipping distance_to_nucleus filter.")
-
-        binned = _bin_transcript_dataframe(df, bin_size=bin_size, feature_names=include_features)
-
-        expression_matrix = coo_matrix(
-            (binned["counts"], (binned["bin_rows"], binned["feature_indices"])),
-            shape=(len(binned["occupied_x_bins"]), len(binned["feature_names"])),
-        )
-
-        adata = ad.AnnData(X=expression_matrix.tocsr())
-        adata.obs_names = [f'bin_{i}' for i in range(adata.n_obs)]
-        adata.var_names = list(binned["feature_names"])
-
-        if adata.n_obs:
-            x_bins = binned["occupied_x_bins"].astype(int)
-            y_bins = binned["occupied_y_bins"].astype(int)
-            ymid = (y_bins.max() - y_bins.min()) / 2.0
-            y_bins_plot = -(y_bins - ymid).astype(int)
-            bin_coords = np.column_stack([x_bins, y_bins_plot])
-            spatial_um = np.column_stack([
-                (x_bins + 0.5) * float(bin_size),
-                (y_bins + 0.5) * float(bin_size),
-            ])
-        else:
-            bin_coords = np.zeros((0, 2), dtype=int)
-            spatial_um = np.zeros((0, 2), dtype=float)
-
-        adata.obs[['x_bin', 'y_bin']] = bin_coords
-        adata.obsm['spatial'] = bin_coords
-        adata.obsm['spatial_um'] = spatial_um
-
-        self.binned_adata = adata
-        self.binned_adata.uns['bin_size'] = float(bin_size)
-        self.binned_adata.uns['pixel_size'] = self.pixel_size
-        self.binned_adata.uns['x_bin_edges'] = (
-            np.array([], dtype=float)
-            if not len(binned["x_bin_values"])
-            else np.arange(
-                binned["x_bin_values"][0] * bin_size,
-                (binned["x_bin_values"][-1] + 1) * bin_size + bin_size,
-                bin_size,
-                dtype=float,
-            )
-        )
-        self.binned_adata.uns['y_bin_edges'] = (
-            np.array([], dtype=float)
-            if not len(binned["y_bin_values"])
-            else np.arange(
-                binned["y_bin_values"][0] * bin_size,
-                (binned["y_bin_values"][-1] + 1) * bin_size + bin_size,
-                bin_size,
-                dtype=float,
-            )
+        self.binned_adata = _create_binned_adata(
+            self,
+            bin_size=bin_size,
+            exclude_unassigned=exclude_unassigned,
+            distance_to_nucleus=distance_to_nucleus,
+            include_features=include_features,
         )
 
     def assign_cells_to_ROIs(self,
@@ -2642,653 +1840,17 @@ class XenData:
 
         Note: The binned AnnData object must be created first using create_binned_adata().
         """
-        bin_size = self.binned_adata.uns['bin_size']
-
-        if genes is None:
-            genes = self.binned_adata.var_names.tolist()
-        elif isinstance(genes, str):
-            genes = [genes]
-
-        if not output_path.endswith('.ome.tiff'):
-            raise ValueError("Output path must end with .ome.tiff")
-        output_dir = os.path.dirname(output_path)
-        if output_dir and not os.path.exists(output_dir):
-            raise ValueError(f"Output directory does not exist: {output_dir}")
-
-        imdata = create_multilayer_image(self, genes)
-        if flip_y:
-            imdata = imdata[::-1, :, :]
-
-        _write_ome_tiff(imdata,
-                        channel_names=genes,
-                        compression=compression,
-                        physical_size_x=bin_size,
-                        physical_size_y=bin_size,
-                        output_path=output_path,
-                        pyramidal=pyramidal,
-                        pyramid_scale=pyramid_scale,
-                        tile=tile)
+        return _write_ome_tiff_bundle(
+            self,
+            genes=genes,
+            output_path=output_path,
+            flip_y=flip_y,
+            compression=compression,
+            pyramidal=pyramidal,
+            pyramid_scale=pyramid_scale,
+            tile=tile,
+        )
     
-def _read_xenium_table_if_present(xenium_folder, filename):
-    path = os.path.join(xenium_folder, filename)
-    if os.path.exists(path):
-        return pd.read_parquet(path)
-    return None
-
-def _export_crop_origin_um(xdata):
-    subset_roi = getattr(xdata, "subset_roi", None)
-    if subset_roi is None:
-        return 0.0, 0.0
-    minx, _, miny, _ = _roi_bounds_um(subset_roi)
-    x0_px = max(0, int(np.floor(minx / xdata.pixel_size)))
-    y0_px = max(0, int(np.floor(miny / xdata.pixel_size)))
-    return x0_px * xdata.pixel_size, y0_px * xdata.pixel_size
-
-def _rebase_spatial_dataframe(df, origin_um):
-    if df is None:
-        return None
-    x0_um, y0_um = origin_um
-    out = df.copy()
-    x_cols = ["x_location", "x_centroid", "vertex_x"]
-    y_cols = ["y_location", "y_centroid", "vertex_y"]
-    for col in x_cols:
-        if col in out.columns:
-            out[col] = out[col] - x0_um
-    for col in y_cols:
-        if col in out.columns:
-            out[col] = out[col] - y0_um
-    return out
-
-def _parse_ome_xml(ome_xml):
-    import xml.etree.ElementTree as ET
-    root = ET.fromstring(ome_xml)
-    ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
-    return root, ns
-
-def _detect_linked_protein_images(xenium_folder):
-    folder = os.path.join(xenium_folder, "morphology_focus")
-    if not os.path.isdir(folder):
-        return None
-
-    files = sorted(
-        f for f in os.listdir(folder)
-        if f.lower().endswith(".ome.tif") and f.lower().startswith("ch")
-    )
-    if not files:
-        return None
-
-    first_file = os.path.join(folder, files[0])
-    try:
-        import tifffile
-        with tifffile.TiffFile(first_file) as tif:
-            ome_xml = tif.ome_metadata
-    except Exception:
-        return None
-
-    if not ome_xml:
-        return None
-
-    root, ns = _parse_ome_xml(ome_xml)
-    pixels = root.find('.//ome:Pixels', ns)
-    if pixels is None:
-        return None
-
-    channel_names = []
-    for channel in root.findall('.//ome:Channel', ns):
-        channel_names.append(channel.attrib.get('Name', f'Channel {len(channel_names)}'))
-
-    file_map = {}
-    for tiffdata in root.findall('.//ome:TiffData', ns):
-        first_c = int(tiffdata.attrib.get('FirstC', 0))
-        uuid_node = tiffdata.find('ome:UUID', ns)
-        if uuid_node is not None and uuid_node.attrib.get('FileName'):
-            file_map[first_c] = uuid_node.attrib['FileName']
-
-    filenames = [file_map.get(i, files[i] if i < len(files) else None) for i in range(len(channel_names))]
-    if any(name is None for name in filenames):
-        return None
-
-    return {
-        "folder": folder,
-        "files": [os.path.join(folder, name) for name in filenames],
-        "filenames": filenames,
-        "channel_names": channel_names,
-        "axes": "CYX",
-        "shape": (
-            int(pixels.attrib.get("SizeC", len(channel_names))),
-            int(pixels.attrib.get("SizeY", 0)),
-            int(pixels.attrib.get("SizeX", 0)),
-        ),
-        "pixel_size": float(pixels.attrib.get("PhysicalSizeX", 1.0)),
-        "linked": True,
-        "source_file": first_file,
-        "ome_xml_template": ome_xml,
-    }
-
-def _prepare_cells_dataframe(xdata):
-    keep_cells = set(xdata.adata.obs_names.astype(str))
-    cells_df = _read_xenium_table_if_present(xdata.xenium_folder, "cells.parquet")
-
-    if cells_df is not None and "cell_id" in cells_df.columns:
-        cells_df["cell_id"] = cells_df["cell_id"].astype(str)
-        cells_df = cells_df.loc[cells_df["cell_id"].isin(keep_cells)].copy()
-        return cells_df
-
-    fallback = pd.DataFrame(index=xdata.adata.obs_names.astype(str))
-    fallback.index.name = "cell_id"
-    if "spatial" in xdata.adata.obsm:
-        fallback["x_centroid"] = xdata.adata.obsm["spatial"][:, 0]
-        fallback["y_centroid"] = xdata.adata.obsm["spatial"][:, 1]
-    counts = xdata.adata.layers["counts"] if "counts" in xdata.adata.layers else xdata.adata.X
-    fallback["transcript_counts"] = np.asarray(counts.sum(axis=1)).ravel().astype(int)
-    fallback["total_counts"] = fallback["transcript_counts"]
-    return fallback.reset_index()
-
-def _geometry_to_boundary_rows(cell_id, geometry, label_id):
-    rows = []
-    polygons = [geometry] if geometry.geom_type == "Polygon" else list(geometry.geoms)
-    for poly in polygons:
-        coords = np.asarray(poly.exterior.coords)
-        for x, y in coords:
-            rows.append({
-                "cell_id": str(cell_id),
-                "vertex_x": float(x),
-                "vertex_y": float(y),
-                "label_id": int(label_id),
-            })
-    return rows
-
-def _prepare_boundary_dataframe(xdata, boundary_kind="cell"):
-    keep_cells = set(xdata.adata.obs_names.astype(str))
-    if boundary_kind == "cell":
-        filename = "cell_boundaries.parquet"
-        geometry_df = xdata.cell_boundaries
-    elif boundary_kind == "nucleus":
-        filename = "nucleus_boundaries.parquet"
-        geometry_df = xdata.nucleus_boundaries
-    else:
-        raise ValueError("boundary_kind must be 'cell' or 'nucleus'.")
-
-    boundary_df = _read_xenium_table_if_present(xdata.xenium_folder, filename)
-    if boundary_df is not None and "cell_id" in boundary_df.columns:
-        boundary_df["cell_id"] = boundary_df["cell_id"].astype(str)
-        return boundary_df.loc[boundary_df["cell_id"].isin(keep_cells)].copy()
-
-    if geometry_df is None:
-        return pd.DataFrame(columns=["cell_id", "vertex_x", "vertex_y", "label_id"])
-
-    rows = []
-    for label_id, (cell_id, row) in enumerate(geometry_df.iterrows(), start=1):
-        rows.extend(_geometry_to_boundary_rows(cell_id, row.geometry, label_id))
-    return pd.DataFrame(rows, columns=["cell_id", "vertex_x", "vertex_y", "label_id"])
-
-def _write_10x_mex(adata, output_dir):
-    from pathlib import Path
-    from scipy import io as spio
-
-    output_dir = Path(output_dir)
-    matrix = adata.layers["counts"] if "counts" in adata.layers else adata.X
-    if not sparse.issparse(matrix):
-        matrix = sparse.csr_matrix(matrix)
-    matrix = matrix.transpose().tocsr()
-
-    barcodes = adata.obs_names.astype(str)
-    gene_ids = None
-    for candidate in ("gene_ids", "id", "gene_id"):
-        if candidate in adata.var.columns:
-            gene_ids = adata.var[candidate].astype(str).to_numpy()
-            break
-    if gene_ids is None:
-        gene_ids = adata.var_names.astype(str).to_numpy()
-
-    feature_types = None
-    for candidate in ("feature_types", "feature_type"):
-        if candidate in adata.var.columns:
-            feature_types = adata.var[candidate].astype(str).to_numpy()
-            break
-    if feature_types is None:
-        feature_types = np.repeat("Gene Expression", adata.n_vars)
-
-    features_df = pd.DataFrame({
-        0: gene_ids,
-        1: adata.var_names.astype(str),
-        2: feature_types,
-    })
-
-    pd.Series(barcodes).to_csv(output_dir / "barcodes.tsv", sep="\t", header=False, index=False)
-    features_df.to_csv(output_dir / "features.tsv", sep="\t", header=False, index=False)
-    spio.mmwrite(str(output_dir / "matrix.mtx"), matrix)
-
-def _roi_bounds_in_pixels(roi_geometry, pixel_size, image_shape):
-    minx, miny, maxx, maxy = _shapely_bounds(roi_geometry)
-    x0 = max(0, int(np.floor(minx / pixel_size)))
-    y0 = max(0, int(np.floor(miny / pixel_size)))
-    x1 = min(int(image_shape[-1]), int(np.ceil(maxx / pixel_size)))
-    y1 = min(int(image_shape[-2]), int(np.ceil(maxy / pixel_size)))
-    if x1 <= x0 or y1 <= y0:
-        raise ValueError("ROI bounding box does not overlap the morphology image.")
-    return x0, x1, y0, y1
-
-
-def _pixel_aligned_bounds_um(bounds, pixel_size):
-    """Snap micron bounds to the pixel grid used for image crops."""
-    xmin, xmax, ymin, ymax = map(float, bounds)
-    x0 = np.floor(xmin / pixel_size) * pixel_size
-    y0 = np.floor(ymin / pixel_size) * pixel_size
-    x1 = np.ceil(xmax / pixel_size) * pixel_size
-    y1 = np.ceil(ymax / pixel_size) * pixel_size
-    return (x0, x1, y0, y1)
-
-
-def _image_extent_um(image_path, pixel_size):
-    """Return the full-resolution image extent in microns."""
-    import tifffile
-
-    with tifffile.TiffFile(image_path) as tif:
-        series = tif.series[0]
-        shape = series.shape
-    return (0.0, shape[-1] * pixel_size, 0.0, shape[-2] * pixel_size)
-
-def _scale_bounds_for_level(bounds, level):
-    x0, x1, y0, y1 = bounds
-    scale = 2 ** level
-    return (
-        int(np.floor(x0 / scale)),
-        int(np.ceil(x1 / scale)),
-        int(np.floor(y0 / scale)),
-        int(np.ceil(y1 / scale)),
-    )
-
-def _cropped_shape_from_bounds(source_array, bounds):
-    x0, x1, y0, y1 = bounds
-    if source_array.ndim == 2:
-        return (y1 - y0, x1 - x0)
-    if source_array.ndim == 3:
-        return (source_array.shape[0], y1 - y0, x1 - x0)
-    raise ValueError(f"Unsupported source array ndim: {source_array.ndim}")
-
-def _iter_cropped_tiles(source_array, bounds, tile=(1024, 1024)):
-    x0, x1, y0, y1 = bounds
-    tile_y, tile_x = tile
-    for y in range(y0, y1, tile_y):
-        for x in range(x0, x1, tile_x):
-            ys = slice(y, min(y + tile_y, y1))
-            xs = slice(x, min(x + tile_x, x1))
-            if source_array.ndim == 2:
-                yield np.asarray(source_array[ys, xs])
-            elif source_array.ndim == 3:
-                yield np.asarray(source_array[:, ys, xs])
-            else:
-                raise ValueError(f"Unsupported source array ndim: {source_array.ndim}")
-
-def _source_series_level_arrays(series, zarr_store=None):
-    import zarr
-    if zarr_store is None:
-        zarr_store = series.aszarr()
-    root = zarr.open(zarr_store, mode="r")
-    if hasattr(root, "shape"):
-        return [root], zarr_store
-    keys = sorted((int(k), k) for k in root.keys() if str(k).isdigit())
-    arrays = [root[k] for _, k in keys]
-    if not arrays:
-        raise ValueError("Could not find pyramid level arrays in zarr store.")
-    return arrays, zarr_store
-
-def _build_pyramid_levels(image, scale_factor=2):
-    if scale_factor < 2:
-        raise ValueError("scale_factor must be >= 2 for pyramid generation.")
-
-    levels = []
-    current = image
-    while min(current.shape[-2:]) > 1:
-        next_level = current[:, ::scale_factor, ::scale_factor]
-        if next_level.shape[-2:] == current.shape[-2:]:
-            break
-        levels.append(next_level)
-        current = next_level
-    return levels
-
-def _write_pyramidal_ome_tiff(image,
-                              output_path,
-                              pixel_size,
-                              tile=(1024, 1024),
-                              pyramid_scale=2,
-                              compression="jpeg2000"):
-    import tifffile
-
-    pyramid_levels = _build_pyramid_levels(image, scale_factor=pyramid_scale)
-    with tifffile.TiffWriter(output_path, bigtiff=True, ome=True) as tif:
-        tif.write(
-            image,
-            metadata={
-                "axes": "ZYX",
-                "PhysicalSizeX": pixel_size,
-                "PhysicalSizeY": pixel_size,
-            },
-            tile=tile,
-            compression=compression,
-            subifds=len(pyramid_levels),
-        )
-        for level in pyramid_levels:
-            tif.write(
-                level,
-                tile=tile,
-                compression=compression,
-                subfiletype=1,
-            )
-
-def _write_pyramidal_ome_tiff_from_levels(level_arrays,
-                                          output_path,
-                                          base_bounds,
-                                          pixel_size,
-                                          tile=(1024, 1024),
-                                          compression="jpeg2000"):
-    import tifffile
-
-    if not level_arrays:
-        raise ValueError("level_arrays must not be empty.")
-
-    cropped_levels = []
-    for level, level_array in enumerate(level_arrays):
-        level_bounds = _scale_bounds_for_level(base_bounds, level)
-        cropped_levels.append(
-            np.asarray(level_array[:, level_bounds[2]:level_bounds[3], level_bounds[0]:level_bounds[1]])
-        )
-
-    with tifffile.TiffWriter(output_path, bigtiff=True, ome=True) as tif:
-        tif.write(
-            cropped_levels[0],
-            metadata={
-                "axes": "ZYX",
-                "PhysicalSizeX": pixel_size,
-                "PhysicalSizeY": pixel_size,
-            },
-            tile=tile,
-            compression=compression,
-            subifds=max(0, len(cropped_levels) - 1),
-        )
-        for level in cropped_levels[1:]:
-            tif.write(
-                level,
-                tile=tile,
-                compression=compression,
-                subfiletype=1,
-            )
-
-def _linked_ome_xml(channel_names,
-                    filenames,
-                    file_uuids,
-                    size_x,
-                    size_y,
-                    pixel_size,
-                    root_uuid,
-                    template_xml=None,
-                    dtype_name="uint16"):
-    import re
-
-    if template_xml is not None:
-        xml_str = template_xml
-        xml_str = re.sub(r'UUID="urn:uuid:[^"]+"', f'UUID="{root_uuid}"', xml_str, count=1)
-        xml_str = re.sub(r'Type="[^"]+"', f'Type="{dtype_name}"', xml_str, count=1)
-        xml_str = re.sub(r'SizeX="[^"]+"', f'SizeX="{size_x}"', xml_str, count=1)
-        xml_str = re.sub(r'SizeY="[^"]+"', f'SizeY="{size_y}"', xml_str, count=1)
-        xml_str = re.sub(r'SizeZ="[^"]+"', 'SizeZ="1"', xml_str, count=1)
-        xml_str = re.sub(r'SizeC="[^"]+"', f'SizeC="{len(channel_names)}"', xml_str, count=1)
-        xml_str = re.sub(r'SizeT="[^"]+"', 'SizeT="1"', xml_str, count=1)
-        xml_str = re.sub(r'PhysicalSizeX="[^"]+"', f'PhysicalSizeX="{pixel_size}"', xml_str, count=1)
-        xml_str = re.sub(r'PhysicalSizeY="[^"]+"', f'PhysicalSizeY="{pixel_size}"', xml_str, count=1)
-        xml_str = xml_str.replace('PhysicalSizeXUnit="µm"', 'PhysicalSizeXUnit="&#181;m"')
-        xml_str = xml_str.replace('PhysicalSizeYUnit="µm"', 'PhysicalSizeYUnit="&#181;m"')
-        xml_str = xml_str.replace('WellOriginXUnit="µm"', 'WellOriginXUnit="&#181;m"')
-        xml_str = xml_str.replace('WellOriginYUnit="µm"', 'WellOriginYUnit="&#181;m"')
-
-        for i, name in enumerate(channel_names):
-            xml_str = re.sub(
-                rf'(<Channel[^>]*ID="Channel:{i}"[^>]*Name=")[^"]+(")',
-                rf'\g<1>{name}\2',
-                xml_str,
-                count=1,
-            )
-
-        uuid_pattern = re.compile(r'(<UUID FileName=")([^"]+)(">)(urn:uuid:[^<]+)(</UUID>)')
-        replacements = iter(zip(filenames, file_uuids))
-        def _replace_uuid(match):
-            try:
-                filename, file_uuid = next(replacements)
-            except StopIteration:
-                return match.group(0)
-            return f'{match.group(1)}{filename}{match.group(3)}{file_uuid}{match.group(5)}'
-        xml_str = uuid_pattern.sub(_replace_uuid, xml_str)
-
-        return xml_str.encode("ascii", "xmlcharrefreplace").decode("ascii")
-
-    channel_entries = "\n".join(
-        f'      <Channel ID="Channel:{i}" Name="{name}" SamplesPerPixel="1"/>'
-        for i, name in enumerate(channel_names)
-    )
-    tiffdata_entries = "\n".join(
-        f'      <TiffData FirstZ="0" FirstT="0" FirstC="{i}" PlaneCount="1"><UUID FileName="{filenames[i]}">{file_uuids[i]}</UUID></TiffData>'
-        for i in range(len(channel_names))
-    )
-    xml_str = f'''<?xml version="1.0" encoding="UTF-8"?>
-<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.openmicroscopy.org/Schemas/OME/2016-06 http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd" UUID="{root_uuid}">
-  <Instrument ID="Instrument:0">
-    <Microscope Manufacturer="10x Genomics" Model="Xenium"/>
-  </Instrument>
-  <Image ID="Image:0">
-    <InstrumentRef ID="Instrument:0"/>
-    <Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="{dtype_name}" SizeX="{size_x}" SizeY="{size_y}" SizeZ="1" SizeC="{len(channel_names)}" SizeT="1" PhysicalSizeX="{pixel_size}" PhysicalSizeXUnit="um" PhysicalSizeY="{pixel_size}" PhysicalSizeYUnit="um">
-{channel_entries}
-{tiffdata_entries}
-    </Pixels>
-  </Image>
-</OME>'''
-    return xml_str.encode("ascii", "xmlcharrefreplace").decode("ascii")
-
-def _write_linked_pyramidal_ome_tiffs(image,
-                                      output_dir,
-                                      filenames,
-                                      channel_names,
-                                      pixel_size,
-                                      template_xml=None,
-                                      tile=(1024, 1024),
-                                      pyramid_scale=2,
-                                      compression="jpeg2000"):
-    import tifffile
-    from pathlib import Path
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if image.ndim != 3:
-        raise ValueError("Expected protein image array with shape (C, Y, X).")
-    if image.shape[0] != len(channel_names) or image.shape[0] != len(filenames):
-        raise ValueError("Protein image channel count does not match filenames/channel names.")
-
-    file_uuids = [f"urn:uuid:{uuid.uuid4()}" for _ in filenames]
-
-    for idx, filename in enumerate(filenames):
-        channel_image = image[idx]
-        pyramid_levels = _build_pyramid_levels(channel_image[np.newaxis, ...], scale_factor=pyramid_scale)
-        ome_xml = _linked_ome_xml(
-            channel_names=channel_names,
-            filenames=filenames,
-            file_uuids=file_uuids,
-            size_x=image.shape[2],
-            size_y=image.shape[1],
-            pixel_size=pixel_size,
-            root_uuid=file_uuids[idx],
-            template_xml=template_xml,
-            dtype_name=image.dtype.name,
-        )
-        with tifffile.TiffWriter(output_dir / filename, bigtiff=True) as tif:
-            tif.write(
-                channel_image,
-                description=ome_xml,
-                tile=tile,
-                compression=compression,
-                subifds=len(pyramid_levels),
-            )
-            for level in pyramid_levels:
-                tif.write(
-                    level[0],
-                    tile=tile,
-                    compression=compression,
-                    subfiletype=1,
-                )
-
-def _write_linked_pyramidal_ome_tiffs_from_levels(level_arrays_by_channel,
-                                                  output_dir,
-                                                  filenames,
-                                                  channel_names,
-                                                  pixel_size,
-                                                  base_bounds,
-                                                  template_xml=None,
-                                                  tile=(1024, 1024),
-                                                  compression="jpeg2000"):
-    import tifffile
-    from pathlib import Path
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if len(level_arrays_by_channel) != len(channel_names) or len(level_arrays_by_channel) != len(filenames):
-        raise ValueError("Protein channel count does not match level arrays.")
-
-    file_uuids = [f"urn:uuid:{uuid.uuid4()}" for _ in filenames]
-    n_levels = len(level_arrays_by_channel[0])
-
-    for idx, filename in enumerate(filenames):
-        channel_levels = level_arrays_by_channel[idx]
-        if len(channel_levels) != n_levels:
-            raise ValueError("Protein channel pyramid depth mismatch.")
-        ome_xml = _linked_ome_xml(
-            channel_names=channel_names,
-            filenames=filenames,
-            file_uuids=file_uuids,
-            size_x=base_bounds[1] - base_bounds[0],
-            size_y=base_bounds[3] - base_bounds[2],
-            pixel_size=pixel_size,
-            root_uuid=file_uuids[idx],
-            template_xml=template_xml,
-            dtype_name=channel_levels[0].dtype.name,
-        )
-        with tifffile.TiffWriter(output_dir / filename, bigtiff=True) as tif:
-            tif.write(
-                data=_iter_cropped_tiles(channel_levels[0], base_bounds, tile=tile),
-                shape=_cropped_shape_from_bounds(channel_levels[0], base_bounds),
-                dtype=channel_levels[0].dtype,
-                description=ome_xml,
-                metadata=None,
-                tile=tile,
-                compression=compression,
-                subifds=max(0, n_levels - 1),
-            )
-            for level, level_array in enumerate(channel_levels[1:], start=1):
-                level_bounds = _scale_bounds_for_level(base_bounds, level)
-                tif.write(
-                    data=_iter_cropped_tiles(level_array, level_bounds, tile=tile),
-                    shape=_cropped_shape_from_bounds(level_array, level_bounds),
-                    dtype=level_array.dtype,
-                    metadata=None,
-                    tile=tile,
-                    compression=compression,
-                    subfiletype=1,
-                )
-
-def _write_morphology_for_slice(xdata,
-                                output_path,
-                                crop=True,
-                                pyramidal=True,
-                                pyramid_scale=2,
-                                tile=(1024, 1024)):
-    import tifffile
-    import zarr
-
-    morphology_path = os.path.join(xdata.xenium_folder, "morphology.ome.tif")
-    if not os.path.exists(morphology_path):
-        raise FileNotFoundError(f"Morphology image not found: {morphology_path}")
-
-    subset_roi = getattr(xdata, "subset_roi", None)
-    if not crop or subset_roi is None:
-        shutil.copy2(morphology_path, output_path)
-        return
-
-    # Compressed Xenium OME-TIFFs may require imagecodecs for tiled region reads.
-    with tifffile.TiffFile(morphology_path) as tif:
-        series = tif.series[0]
-        level_arrays, zarr_store = _source_series_level_arrays(series)
-        try:
-            base_bounds = _roi_bounds_in_pixels(subset_roi, xdata.pixel_size, level_arrays[0].shape)
-            if pyramidal:
-                _write_pyramidal_ome_tiff_from_levels(
-                    level_arrays,
-                    output_path=output_path,
-                    base_bounds=base_bounds,
-                    pixel_size=xdata.pixel_size,
-                    tile=tile,
-                )
-            else:
-                cropped = np.asarray(level_arrays[0][:, base_bounds[2]:base_bounds[3], base_bounds[0]:base_bounds[1]])
-                tifffile.imwrite(
-                    output_path,
-                    cropped,
-                    ome=True,
-                    metadata={
-                        "axes": "ZYX",
-                        "PhysicalSizeX": xdata.pixel_size,
-                        "PhysicalSizeY": xdata.pixel_size,
-                    },
-                )
-        finally:
-            zarr_store.close()
-
-def _write_protein_images_for_slice(xdata,
-                                    output_dir,
-                                    crop=True,
-                                    pyramid_scale=2,
-                                    tile=(1024, 1024)):
-    import tifffile
-    import zarr
-    from pathlib import Path
-
-    protein_info = xdata.protein_images
-    if protein_info is None:
-        return
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    subset_roi = getattr(xdata, "subset_roi", None)
-    if not crop or subset_roi is None:
-        for src, name in zip(protein_info["files"], protein_info["filenames"]):
-            shutil.copy2(src, output_dir / name)
-        return
-
-    level_arrays_by_channel = []
-    base_bounds = None
-    for src in protein_info["files"]:
-        with tifffile.TiffFile(src) as tif:
-            page = tif.pages[0]
-            levels = [zarr.open(page.aszarr(), mode="r")]
-            if hasattr(page, "pages") and page.pages is not None:
-                for subpage in page.pages:
-                    levels.append(zarr.open(subpage.aszarr(), mode="r"))
-            level_arrays_by_channel.append(levels)
-            if base_bounds is None:
-                base_bounds = _roi_bounds_in_pixels(subset_roi, xdata.pixel_size, levels[0].shape)
-
-    _write_linked_pyramidal_ome_tiffs_from_levels(
-        level_arrays_by_channel,
-        output_dir=output_dir,
-        filenames=protein_info["filenames"],
-        channel_names=protein_info["channel_names"],
-        pixel_size=xdata.pixel_size,
-        base_bounds=base_bounds,
-        template_xml=protein_info.get("ome_xml_template"),
-        tile=tile,
-    )
-
 ## DEPRECATED
 #def read_ROI_from_csv(XenAna_csv_file):
 #    """
@@ -3419,7 +1981,7 @@ def rasterize_rgb(xdata,
     im = Image.fromarray(merged)
 
     # Plot the image with annotations for each gene or gene set
-    pl.figure(figsize=[fig_scale * aspect_ratio, fig_scale])
+    plt.figure(figsize=[fig_scale * aspect_ratio, fig_scale])
 
     # Create a sub-function to add a legend outside the main plot
     def add_legend_outside(labels, colors, fig, ax):
@@ -3444,7 +2006,7 @@ def rasterize_rgb(xdata,
         )
 
     # Add the legend to the plot
-    fig, ax = pl.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
+    fig, ax = plt.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
     ax.imshow(im)
     ax.axis('off')
 
@@ -3453,8 +2015,8 @@ def rasterize_rgb(xdata,
     labels = list(gene_sets.keys())
     add_legend_outside(labels, colors, fig, ax)
 
-    pl.tight_layout()
-    pl.show()
+    plt.tight_layout()
+    plt.show()
 
 def plot_binned_rgb(xdata, 
     genes_or_gene_sets, 
@@ -3581,7 +2143,7 @@ def plot_binned_rgb(xdata,
     else:
         im = imdata[...,:3].astype(np.uint8)
     # Plot the image with annotations for each gene or gene set
-    pl.figure(figsize=[fig_scale * aspect_ratio, fig_scale])
+    plt.figure(figsize=[fig_scale * aspect_ratio, fig_scale])
 
     # Create a sub-function to add a legend outside the main plot
     def add_legend_outside(labels, colors, fig, ax):
@@ -3606,7 +2168,7 @@ def plot_binned_rgb(xdata,
         )
 
     # Add the legend to the plot
-    fig, ax = pl.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
+    fig, ax = plt.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
 
     if bounds is None:
         ax.imshow(im)
@@ -3621,137 +2183,8 @@ def plot_binned_rgb(xdata,
     labels = list(gene_sets.keys())
     add_legend_outside(labels, colors, fig, ax)
 
-    pl.tight_layout()
-    pl.show()
-
-def _write_ome_tiff(image_array,
-                    channel_names,
-                    channel_ids=None,
-                    channel_colors=None,
-                    physical_size_x=5,
-                    physical_size_y=5,
-                    significant_bits=12,
-                    compression='zlib',
-                    output_path=None,
-                    pyramidal: bool = True,
-                    pyramid_scale: int = 2,
-                    tile: tuple = (1024, 1024)):
-    import tifffile
-
-    # Expect image_array of shape (Y, X, C)
-    Y, X, C = image_array.shape
-    if len(channel_names) != C:
-        raise ValueError("Length of channel_names must equal the number of channels in image_array.")
-    if channel_ids is not None and len(channel_ids) != C:
-        raise ValueError("Length of channel_ids must equal the number of channels in image_array.")
-    if channel_colors is not None and len(channel_colors) != C:
-        raise ValueError("Length of channel_colors must equal the number of channels in image_array.")
-
-    # Generate default channel IDs if none are provided.
-    if channel_ids is None:
-        channel_ids = [f"Channel:{i}" for i in range(C)]
-
-    # --- Rearrange from (Y, X, C) to XYZCT order. ---
-    # Insert singleton Z and T dimensions.
-    # arr = np.transpose(image_array, (2, 0, 1))  # becomes (C, Y, X) #DEPRECATED
-    # arr = arr[np.newaxis, :, np.newaxis, :, :]  # becomes (1, C, 1, Y, X) #DEPRECATED
-
-    def to_tczyx(a):  # (Y, X, C) -> (1, C, 1, Y, X)
-        return a.transpose(2, 0, 1)[np.newaxis, :, np.newaxis, :, :]
-    arr = to_tczyx(image_array)
-
-    # Build channel metadata entries.
-    """
-    channel_entries = []
-    for i, name in enumerate(channel_names):
-        if channel_colors is not None:
-            entry = f'      <Channel ID="{channel_ids[i]}" Name="{name}" SamplesPerPixel="1" Color="{channel_colors[i]}" />'
-        else:
-            entry = f'      <Channel ID="{channel_ids[i]}" Name="{name}" SamplesPerPixel="1" />'
-        channel_entries.append(entry)
-    channel_entries_str = "\n".join(channel_entries)
-    """
-
-    channel_entries = []
-    channel_maxes = image_array.reshape(-1, image_array.shape[2]).max(axis=0)
-    
-    for i, name in enumerate(channel_names):
-        max_val = float(channel_maxes[i])  # convert to float to avoid dtype issues in XML
-        color_attr = f' Color="{channel_colors[i]}"' if channel_colors is not None else ''
-        entry = f'''      <Channel ID="{channel_ids[i]}" Name="{name}" SamplesPerPixel="1"{color_attr}>
-            <DisplaySettings>
-            <DisplayRangeMin>0</DisplayRangeMin>
-            <DisplayRangeMax>{max_val}</DisplayRangeMax>
-            </DisplaySettings>
-        </Channel>'''
-        channel_entries.append(entry)
-    channel_entries_str = "\n".join(channel_entries)
-
-    # Build the OME-XML metadata.
-    
-    # dtype name must be OME-compatible
-    dtype_name = {
-        np.dtype("uint8"): "uint8",
-        np.dtype("uint16"): "uint16",
-        np.dtype("float32"): "float",
-        np.dtype("float64"): "double",
-    }.get(image_array.dtype, image_array.dtype.name)
-    # in OME spec below, under Pixels:
-    # Try substituting in dtype_name.  WORKING: image_array.dtype.name
-    ome_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-    <OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">
-    <Image ID="Image:0">
-    <Pixels DimensionOrder="XYZCT" ID="Pixels:0" Type="{image_array.dtype.name}"
-            SizeX="{X}"
-            SizeY="{Y}"
-            SizeC="{C}"
-            SizeZ="1"
-            SizeT="1"
-            PhysicalSizeX="{physical_size_x}"
-            PhysicalSizeY="{physical_size_y}"
-            SignificantBits="{significant_bits}">
-            {channel_entries_str}
-    </Pixels>
-    </Image>
-    </OME>'''
-
-    if output_path is None:
-        output_path = f'multilayer_{physical_size_x}um.ome.tiff'
-
-    if pyramidal:
-        # Build pyramid from (C, Y, X); _build_pyramid_levels subsamples [:, ::s, ::s]
-        arr_cyx = image_array.transpose(2, 0, 1)  # (Y, X, C) → (C, Y, X)
-        pyramid_levels = _build_pyramid_levels(arr_cyx, scale_factor=pyramid_scale)
-
-        def _to_tczyx(a_cyx):
-            return a_cyx[np.newaxis, :, np.newaxis, :, :]  # → (1, C, 1, Y, X)
-
-        with tifffile.TiffWriter(output_path, bigtiff=True) as tif:
-            tif.write(
-                _to_tczyx(arr_cyx),
-                photometric='minisblack',
-                compression=compression,
-                description=ome_xml,
-                metadata=None,
-                tile=tile,
-                subifds=len(pyramid_levels),
-            )
-            for level in pyramid_levels:
-                tif.write(
-                    _to_tczyx(level),
-                    photometric='minisblack',
-                    compression=compression,
-                    metadata=None,
-                    tile=tile,
-                    subfiletype=1,
-                )
-    else:
-        tifffile.imwrite(output_path,
-                         arr,
-                         photometric='minisblack',
-                         compression=compression,
-                         description=ome_xml,
-                         metadata=None)
+    plt.tight_layout()
+    plt.show()
 
 def create_multilayer_image(xdata, genes, log=False):
     """
@@ -3928,10 +2361,10 @@ def plot_binned_greyscale(xdata,
     if return_img:
         return imdata
     else:
-        fig, ax = pl.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
+        fig, ax = plt.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
         ax.imshow(imdata, cmap=cmap)
         ax.axis('off')
-        pl.show()
+        plt.show()
 
 def show_ome_tiff(image_path,
                   figsize: Optional[tuple] = None,
@@ -3997,9 +2430,9 @@ def show_ome_tiff(image_path,
     import tifffile
 
     if dpi is None:
-        dpi = pl.rcParams['figure.dpi']
+        dpi = plt.rcParams['figure.dpi']
     if figsize is None:
-        figsize = pl.rcParams['figure.figsize']
+        figsize = plt.rcParams['figure.figsize']
 
     display_px = max(int(figsize[0] * dpi), int(figsize[1] * dpi))
 
@@ -4107,7 +2540,7 @@ def show_ome_tiff(image_path,
 
     own_fig = ax is None
     if own_fig:
-        fig, ax = pl.subplots(figsize=figsize, dpi=dpi)
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
     if micron_coords:
         # Compute the µm extent of the displayed region so the axes use the same
@@ -4132,149 +2565,9 @@ def show_ome_tiff(image_path,
     ax.axis('off')
 
     if own_fig:
-        pl.tight_layout()
+        plt.tight_layout()
 
     return ax
-
-def _apply_weights(d, scheme: Optional[Literal["binary","inverse","gaussian"]], sigma: Optional[float]):
-    if scheme in (None, "binary"):
-        return np.ones_like(d, dtype=float)
-    if scheme == "inverse":
-        # avoid div-by-zero on self or coincident points
-        return 1.0 / np.maximum(d, 1e-12)
-    if scheme == "gaussian":
-        if not sigma:
-            raise ValueError("sigma must be provided for gaussian weighting")
-        return np.exp(-(d**2) / (2.0 * sigma**2))
-    raise ValueError(f"Unknown weight scheme: {scheme}")
-
-def build_spatial_graph(
-    coords: np.ndarray,
-    *,
-    use_radius: Optional[float] = None,   # in same units as coords (e.g., µm)
-    n_neighbors: int = 30,                # used if use_radius is None
-    include_self: bool = False,
-    symmetrize: Literal["none","max","mean"] = "max",
-    weight_scheme: Optional[Literal["binary","inverse","gaussian"]] = "binary",
-    sigma: Optional[float] = None         # required if weight_scheme="gaussian"
-) -> sparse.csr_matrix:
-    """
-    Return CSR adjacency (cells x cells) using cKDTree. No sklearn/squidpy.
-    """
-    from scipy.spatial import cKDTree
-    N = coords.shape[0]
-    tree = cKDTree(coords)
-
-    if use_radius is not None:
-        # Efficient radius graph with distances
-        D = tree.sparse_distance_matrix(tree, max_distance=use_radius, output_type="coo_matrix")
-        if not include_self:
-            mask = D.row != D.col
-            D = sparse.coo_matrix((D.data[mask], (D.row[mask], D.col[mask])), shape=(N, N))
-        w = _apply_weights(D.data, weight_scheme, sigma)
-        A = sparse.coo_matrix((w, (D.row, D.col)), shape=(N, N)).tocsr()
-    else:
-        # kNN graph
-        k = n_neighbors + (1 if include_self else 0)
-        d, idx = tree.query(coords, k=k)  # shapes: (N,k)
-        # build COO
-        rows = np.repeat(np.arange(N), k)
-        cols = idx.ravel()
-        if not include_self:
-            mask = rows != cols
-            rows, cols = rows[mask], cols[mask]
-            d = d.ravel()[mask]
-        else:
-            d = d.ravel()
-        w = _apply_weights(d, weight_scheme, sigma)
-        A = sparse.coo_matrix((w, (rows, cols)), shape=(N, N)).tocsr()
-
-    # symmetrize if requested
-    if symmetrize == "max":
-        A = A.maximum(A.T)
-    elif symmetrize == "mean":
-        A = 0.5 * (A + A.T)
-        A.eliminate_zeros()
-
-    return A
-
-def build_niches(
-    adata,
-    *,
-    xy_key: Optional[str] = "spatial",     # adata.obsm key OR None to use obs[['x','y']]
-    label_key: str = "graphclust",
-    use_radius: Optional[float] = None,
-    n_neighbors: int = 30,
-    symmetrize: Literal["none","max","mean"] = "max",
-    weight_scheme: Optional[Literal["binary","inverse","gaussian"]] = "binary",
-    sigma: Optional[float] = None,
-    normalize: Literal["none","prop","zscore"] = "prop",
-    k_niches: Optional[int] = None,        # if set, assigns clusters via k-means
-    key_added: str = "niche"
-):
-    """
-    Builds a neighbor-composition matrix (cells x celltypes) and stores it in:
-      - adata.obsm[f"{key_added}_X"]  (dense np.ndarray)
-      - adata.uns[f"{key_added}_celltypes"] (list of column names)
-      - adata.obsp["spatial_connectivities"] (sparse CSR adjacency)
-      - optionally adata.obs[f"{key_added}_k{k_niches}"] if k_niches provided
-    """
-    # ---- coordinates ----
-    if xy_key is not None and xy_key in adata.obsm:
-        coords = np.asarray(adata.obsm[xy_key], dtype=float)
-        if coords.shape[1] > 2:  # handle (x,y,*) by taking first two cols
-            coords = coords[:, :2]
-    else:
-        coords = np.asarray(adata.obs[["x","y"]].values, dtype=float)
-
-    # ---- spatial graph ----
-    A = build_spatial_graph(
-        coords,
-        use_radius=use_radius,
-        n_neighbors=n_neighbors,
-        include_self=False,
-        symmetrize=symmetrize,
-        weight_scheme=weight_scheme,
-        sigma=sigma,
-    )
-    adata.obsp["spatial_connectivities"] = A
-
-    # ---- one-hot of cell types ----
-    ct = adata.obs[label_key].astype("category")
-    ct_names = list(ct.cat.categories)
-    onehot_df = pd.get_dummies(ct, sparse=True)  # cells x celltypes
-    onehot = sparse.csr_matrix(onehot_df.values)
-
-    # ---- neighbor composition ----
-    X = (A @ onehot).astype(float)  # counts or weighted sums
-
-    # ---- normalization ----
-    if normalize == "prop":
-        row_sums = np.asarray(X.sum(axis=1)).ravel()
-        row_sums[row_sums == 0] = 1.0
-        X = sparse.diags(1.0 / row_sums) @ X
-    elif normalize == "zscore":
-        col_means = np.asarray(X.mean(axis=0)).ravel()
-        col_sqmeans = np.asarray(X.multiply(X).mean(axis=0)).ravel()
-        col_stds = np.sqrt(np.maximum(col_sqmeans - col_means**2, 1e-12))
-        # center: X - mean
-        X = X - sparse.csr_matrix(np.broadcast_to(col_means, X.shape))
-        # scale
-        invstd = 1.0 / np.where(col_stds == 0, 1.0, col_stds)
-        X = X @ sparse.diags(invstd)
-
-    # ---- stash ----
-    adata.obsm[f"{key_added}_X"] = X.toarray() if sparse.issparse(X) else X
-    adata.uns[f"{key_added}_celltypes"] = ct_names
-
-    # ---- (optional) cluster in niche space ----
-    if k_niches is not None and k_niches > 1:
-        from sklearn.cluster import KMeans
-        km = KMeans(n_clusters=k_niches, n_init="auto", random_state=0)
-        labs = km.fit_predict(adata.obsm[f"{key_added}_X"])
-        adata.obs[f"{key_added}_k{k_niches}"] = pd.Categorical(labs.astype(str))
-
-    return adata
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -4607,3 +2900,21 @@ def splat(
         ax.set_title(", ".join(chan_names[:3]))
 
     return rgb, disp, ax
+
+
+try:
+    from . import pl as _pl_namespace
+except ImportError:
+    _pl_namespace = _load_local_module("_xentools_pl", os.path.join("pl", "__init__.py"))
+
+create_bins = _pl_namespace.create_bins
+bin_expression = _pl_namespace.bin_expression
+create_binned_image = _pl_namespace.create_binned_image
+rasterize = _pl_namespace.rasterize
+rasterize_rgb = _pl_namespace.rasterize_rgb
+plot_binned_rgb = _pl_namespace.plot_binned_rgb
+create_multilayer_image = _pl_namespace.create_multilayer_image
+plot_binned_greyscale = _pl_namespace.plot_binned_greyscale
+show_ome_tiff = _pl_namespace.show_ome_tiff
+splat = _pl_namespace.splat
+pl = _pl_namespace

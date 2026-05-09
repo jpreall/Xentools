@@ -1,6 +1,16 @@
-"""Analysis helpers for xentools.
+"""Analysis helpers for xentools."""
 
-Phase 0 note:
-Implementation still primarily lives in `xentools.py`. These modules exist as
-stable destinations for the staged refactor.
-"""
+from .binning import _bin_transcript_dataframe, create_binned_adata
+from .graph import _apply_weights, build_spatial_graph
+from .niches import build_niches, evaluate_niche_k_values
+from .normalization import normalize_tp10k
+
+__all__ = [
+    "_apply_weights",
+    "_bin_transcript_dataframe",
+    "build_niches",
+    "build_spatial_graph",
+    "create_binned_adata",
+    "evaluate_niche_k_values",
+    "normalize_tp10k",
+]
