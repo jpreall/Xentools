@@ -404,10 +404,30 @@ Progress:
 
 After the implementation has stabilized:
 
-- [ ] decide what should be exported from package root
-- [ ] decide whether some old helpers should become private
-- [ ] deprecate accidental public symbols if needed
-- [ ] fix stale names and typos such as mismatched `__all__` entries
+- [x] decide what should be exported from package root
+- [x] decide whether some old helpers should become private
+- [x] deprecate accidental public symbols if needed
+- [x] fix stale names and typos such as mismatched `__all__` entries
+
+Progress:
+
+- added explicit public `__all__` to `xentools.py`
+- aligned package-root `__init__.py` exports with the compatibility module and
+  `xentools.pl`
+- removed private `_invert_xen_gene_list_dict` from package-root star exports
+  while leaving direct access available for compatibility
+- added public API tests for root exports and plotting re-export identity
+- removed redundant `read_xen_essentials`
+- moved `read_json` to `utils.misc` / `xentools.utils.read_json`
+- moved palette helpers to `pl.colors` / `xentools.pl.generate_palette`
+- kept segmentation boundary helpers in `xentools.io.read` and removed them from
+  package-root exports
+
+Remaining:
+
+- decide whether shadowed legacy plotting function bodies still present in
+  `xentools.py` should be deleted now or only after `XenData` moves to
+  `core/xendata.py`
 
 ### Deliverable
 

@@ -437,7 +437,7 @@ def splat(
     y_col="y_location",
     gene_col="feature_name",
     genes: Union[None, str, list[str], dict] = None,
-    gains=(1.0, 1.0, 1.0),
+    gains=1.0,
     bounds=None,
     pixel_size_um=1.0,
     sigma_um=2.0,
@@ -447,7 +447,16 @@ def splat(
     show_ticks=False,
     show_legend: bool = True,
     legend_loc: str = "outside right",
+    return_array=False,
 ):
+    """
+    Rasterize transcript positions into one or more display channels.
+
+    By default this function behaves like a plotting function and returns the
+    matplotlib axes containing the rendered image. Set ``return_array=True`` or
+    ``return_array="display"`` to return the normalized display array instead,
+    or ``return_array="raw"`` to return the raw binned/smoothed raster.
+    """
     if hasattr(data, "trans") and not isinstance(data, pd.DataFrame):
         df = data.trans
     elif isinstance(data, pd.DataFrame):
@@ -595,4 +604,12 @@ def splat(
     else:
         ax.set_title(", ".join(chan_names[:3]))
 
-    return rgb, disp, ax
+    if return_array in (False, None):
+        return ax
+    if return_array is True or return_array == "display":
+        return disp
+    if return_array == "raw":
+        return rgb
+    if return_array == "_all":
+        return rgb, disp, ax
+    raise ValueError("return_array must be False, True, 'display', or 'raw'.")

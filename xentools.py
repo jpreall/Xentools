@@ -2,15 +2,10 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import glob, os, sys
-import scanpy as sc
-import json
-import geopandas as gpd
-import re
-import uuid
+import os
+import sys
 import importlib.util
 from typing import Union, Optional, Literal
-from scipy import sparse
 from matplotlib.patches import Patch
 
 
@@ -34,6 +29,16 @@ def _load_local_module(module_name, relative_path):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+try:
+    from .utils.misc import read_json
+    from .utils.geometry import frame, um_to_pixels
+except ImportError:
+    read_json = _load_local_module("_xentools_utils_misc", os.path.join("utils", "misc.py")).read_json
+    _geometry_utils_mod = _load_local_module("_xentools_utils_geometry", os.path.join("utils", "geometry.py"))
+    frame = _geometry_utils_mod.frame
+    um_to_pixels = _geometry_utils_mod.um_to_pixels
 
 
 def _is_lazy_transcripts(obj) -> bool:
@@ -140,11 +145,6 @@ try:
         _read_zarr_adata,
         _read_analysis_zarr,
     )
-    from .io.read.xenium import (
-        create_polygon,
-        import_segmentation_xenium_parquet,
-        import_segmentation_xenium_zarr,
-    )
     from .io.read.boundaries import load_xenium_boundaries
     from .io.read.cells import (
         _make_gene_panel_df as _read_make_gene_panel_df,
@@ -181,7 +181,6 @@ try:
 except ImportError:
     _transcripts_mod = _load_local_module("_xentools_core_transcripts", "core/transcripts.py")
     _zarr_read_mod = _load_local_module("_xentools_io_read_zarr", os.path.join("io", "read", "zarr.py"))
-    _xenium_io_mod = _load_local_module("_xentools_io_read_xenium", os.path.join("io", "read", "xenium.py"))
     _xenium_write_mod = _load_local_module("_xentools_io_write_xenium", os.path.join("io", "write", "xenium.py"))
     _images_read_mod = _load_local_module("_xentools_io_read_images", os.path.join("io", "read", "images.py"))
     _images_write_mod = _load_local_module("_xentools_io_write_images", os.path.join("io", "write", "images.py"))
@@ -195,9 +194,6 @@ except ImportError:
     _open_zarr_group_compat = _zarr_read_mod._open_zarr_group_compat
     _read_zarr_adata = _zarr_read_mod._read_zarr_adata
     _read_analysis_zarr = _zarr_read_mod._read_analysis_zarr
-    create_polygon = _xenium_io_mod.create_polygon
-    import_segmentation_xenium_parquet = _xenium_io_mod.import_segmentation_xenium_parquet
-    import_segmentation_xenium_zarr = _xenium_io_mod.import_segmentation_xenium_zarr
     _boundaries_read_mod = _load_local_module(
         "_xentools_io_read_boundaries",
         os.path.join("io", "read", "boundaries.py"),
@@ -252,169 +248,17 @@ def read_xen_panel(gene_panel_file):
     """
     return _read_xen_panel(gene_panel_file)
 
-def read_json(json_file):
-    """
-    Reads a JSON file and returns the contents as a dictionary.
-    Note that experiment.xenium is a JSON file, so this function can be used to read it.
-    """
-    with open(json_file) as f:
-        metadata_dict = json.load(f)
-    return metadata_dict
-
 def _make_gene_panel_df(gene_panel_dict):
     """
     Converts the gene panel dictionary to a DataFrame.
     """
     return _read_make_gene_panel_df(gene_panel_dict)
 
-def um_to_pixels(
-        arr: Union[
-        np.typing.ArrayLike,        # covers list, tuple, np.ndarray
-        "pd.Series",          # forward ref; avoids hard dep on pandas
-        ],
-        pixel_size: float = 0.2125
-    ) -> np.ndarray:
-
-    """
-    Convert array-like numerical input from microns to pixels.
-
-    Parameters
-    ----------
-    arr : array-like
-        Numerical data in microns. Can be list, tuple, np.ndarray, or pandas Series.
-    pixel_size : float, default=0.2125
-        Microns per pixel.
-
-    Returns
-    -------
-    np.ndarray of int
-        Converted values in pixels (rounded to nearest integer).
-    """
-    arr = np.asarray(arr, dtype=float)  # safely converts most array-like
-    return np.round(arr / pixel_size).astype(int)
-
 def read_xenium_to_anndata(xenium_output_folder, include_non_gene_features=False):
     return _read_xenium_to_anndata(
         xenium_output_folder,
         include_non_gene_features=include_non_gene_features,
     )
-
-def read_xen_essentials(xenium_folder, verbose = True):
-    panel_file = f'{xenium_folder}/gene_panel.json'
-    cellboundaries_file = f'{xenium_folder}/cell_boundaries.parquet'
-    transcripts_file = f'{xenium_folder}/transcripts.parquet'
-    clusters_file = f'{xenium_folder}/analysis/clustering/gene_expression_graphclust/clusters.csv'
-    nucboundaries_file = f'{xenium_folder}/nucleus_boundaries.parquet'
-    
-
-    """
-    if verbose:
-        print('Reading Cell Boundaries')
-    celldata = pd.read_parquet(cellboundaries_file)
-    celldata.set_index('cell_id', inplace=True)
-    celldata.index = celldata.index.astype('str')
-    celldata['cell'] = celldata.index.copy()
-
-    if verbose:
-        print('Reading Nuclear Boundaries')
-    nuc = pd.read_parquet(nucboundaries_file)
-    nuc.set_index('cell_id', inplace=True)
-    nuc.index = nuc.index.astype('str')
-    nuc['cell'] = nuc.index.copy()
-    """
-
-    if verbose:
-        print('Reading Clusters')
-    if os.path.exists(clusters_file):
-        clusters = pd.read_csv(clusters_file, index_col=0)
-        clusters.index = clusters.index.astype('str')
-        clusters['Cluster'] = clusters['Cluster'].astype('str')
-    else:
-        clusters = pd.DataFrame(columns=['Cluster'])
-    #celldata['cluster'] = celldata.index.map(clusters['Cluster'].to_dict())
-    #celldata['cluster'] = celldata['cluster'].astype('category')
-    color_key = dict(zip(clusters['Cluster'].unique(),sc.pl.palettes.default_28))
-    #celldata['color'] = celldata['cluster'].map(color_key)
-    
-    if verbose:
-        print('Reading Transcripts')
-    trans = pd.read_parquet(transcripts_file)
-
-    ## Sanitize in case of bytes:
-    sample = trans["feature_name"].iloc[:100]
-    # If any are bytes, run the C‐level vectorized decode
-    if sample.map(lambda x: isinstance(x, (bytes, bytearray))).any():
-    # This uses the fast C implementation under the hood
-        trans["feature_name"] = trans["feature_name"].str.decode("utf-8")
-    # 3) Ensure pandas knows it’s a true string column
-    #trans["feature_name"] = trans["feature_name"].astype("string")
-
-    gene_panel = read_xen_panel(panel_file) if os.path.exists(panel_file) else None
-
-    return trans, clusters, gene_panel
-    #return celldata, trans, nuc, clusters, gene_panel
-
-
-def frame(transcripts_df):
-    xmin,xmax = transcripts_df['x_location'].min(),transcripts_df['x_location'].max()
-    ymin,ymax = transcripts_df['y_location'].min(),transcripts_df['y_location'].max()
-    return np.array([[xmin,xmax],[ymin,ymax]])
-
-def generate_palette(n, lightness=0.5, sat_min=0.5, sat_max=1.0, preview = False):
-    """
-    Generate a palette of n HEX colors.
-    
-    Colors are generated in HSL space with:
-      - Hues evenly spaced across the circle (0 to 1)
-      - Lightness fixed to a user-specified value (default 0.5)
-      - Saturation randomly sampled between sat_min and sat_max
-      
-    Args:
-        n (int): Number of colors to generate.
-        lightness (float): Fixed lightness value (0 to 1).
-        sat_min (float): Minimum saturation value (0 to 1).
-        sat_max (float): Maximum saturation value (0 to 1).
-
-    Returns:
-        List[str]: List of HEX color strings.
-    """
-    import colorsys
-    import random
-
-    palette = []
-    # Evenly space hues to maximize contrast.
-    hues = [i / n for i in range(n)]
-    for h in hues:
-        # Randomize saturation for variation.
-        s = random.uniform(sat_min, sat_max)
-        # colorsys uses HLS ordering: (hue, lightness, saturation)
-        r, g, b = colorsys.hls_to_rgb(h, lightness, s)
-        hex_color = '#{:02X}{:02X}{:02X}'.format(int(r * 255), int(g * 255), int(b * 255))
-        palette.append(hex_color)
-    if preview:
-        plot_palette(palette)
-        
-    return palette
-    
-def plot_palette(palette):
-    """
-    Plot a palette of colors as a horizontal line.
-    
-    Args:
-        palette (List[str]): List of HEX color strings.
-    """
-    n = len(palette)
-    fig, ax = plt.subplots(figsize=(n, 2))
-    
-    # Draw each color as a rectangle
-    for i, color in enumerate(palette):
-        ax.add_patch(plt.Rectangle((i, 0), 1, 1, color=color))
-    
-    ax.set_xlim(0, n)
-    ax.set_ylim(0, 1)
-    ax.axis('off')  # Hide axes
-    plt.show()
-
 
 class XenData:
     def __init__(self, xenium_folder, verbose=True, roi_file=None, crop_to_selection=None,
@@ -1188,6 +1032,7 @@ class XenData:
               image_alpha: float = 1.0,
               splat_alpha: float = 0.8,
               splat_cmap: str = 'hot',
+              return_array=False,
               ax=None,
               **splat_kwargs):
         """
@@ -1234,6 +1079,11 @@ class XenData:
         splat_cmap : str
             Colormap for single-channel splat output before RGBA compositing.
             Ignored for multi-channel (RGB) output. Default ``'hot'``.
+        return_array : bool | {'display', 'raw'}
+            Return behavior. ``False`` (default) returns the matplotlib axes.
+            ``True`` or ``'display'`` returns the normalized display array used
+            for plotting. ``'raw'`` returns the raw binned/smoothed raster before
+            display normalization and gain clipping.
         ax : matplotlib Axes, optional
             Axes to plot into. If ``None``, a new figure is created.
         **splat_kwargs
@@ -1244,11 +1094,9 @@ class XenData:
 
         Returns
         -------
-        rgb : np.ndarray
-            Raw per-channel raster data (binned / smoothed counts).
-        disp : np.ndarray
-            Normalised display image, clipped to [0, 1].
-        ax : matplotlib Axes
+        matplotlib.axes.Axes | numpy.ndarray
+            Axes by default. If ``return_array`` is requested, returns either
+            the normalized display array or the raw raster array.
         """
         def _resolve_image_path(channel_name):
             if channel_name is None:
@@ -1307,7 +1155,7 @@ class XenData:
                 img_artist.set_clim(vmin, vmax / image_alpha)
 
         # ── rasterize via module-level splat() ────────────────────────────────
-        rgb, disp, ax = splat(self, genes=genes, ax=ax, **splat_kwargs)
+        rgb, disp, ax = splat(self, genes=genes, ax=ax, return_array="_all", **splat_kwargs)
 
         # ── RGBA composite (only when a background image is present) ─────────
         if image_channel is not None:
@@ -1322,7 +1170,13 @@ class XenData:
             rgba[..., 3] = np.clip(signal * splat_alpha, 0, 1)
             ax.images[-1].set_data(rgba)
 
-        return rgb, disp, ax
+        if return_array in (False, None):
+            return ax
+        if return_array is True or return_array == "display":
+            return disp
+        if return_array == "raw":
+            return rgb
+        raise ValueError("return_array must be False, True, 'display', or 'raw'.")
 
     def plot_boundaries(
         self,
@@ -1338,6 +1192,11 @@ class XenData:
         ax=None,
         figsize: tuple = (8, 8),
         max_cells: Optional[int] = None,
+        show_legend: bool = True,
+        legend_loc: str = 'outside right',
+        legend_title: Optional[str] = None,
+        background: str = 'black',
+        show_axis: bool = False,
     ):
         """
         Overlay cell or nucleus boundary polygons on an axes.
@@ -1374,6 +1233,22 @@ class XenData:
         max_cells : int or None
             If set, randomly subsample to at most this many cells (for speed
             when no ROI has been applied to a large dataset).
+        show_legend : bool
+            Whether to draw a categorical legend when ``color_by`` is used.
+            Default True.
+        legend_loc : str
+            Legend placement. Defaults to ``'outside right'`` so labels do not
+            cover the plotted boundaries. Also accepts ``'outside left'``,
+            ``'outside bottom'``, ``'outside top'``, or any matplotlib legend
+            location string.
+        legend_title : str or None
+            Override the legend title. Defaults to ``color_by``.
+        background : colour spec
+            Axes/figure background used only when creating a standalone axes.
+            Ignored when plotting onto an existing ``ax``. Default ``'black'``.
+        show_axis : bool
+            Whether to show ticks and axis decorations for standalone boundary
+            plots. Ignored for existing axes. Default False.
 
         Returns
         -------
@@ -1393,6 +1268,11 @@ class XenData:
             ax=ax,
             figsize=figsize,
             max_cells=max_cells,
+            show_legend=show_legend,
+            legend_loc=legend_loc,
+            legend_title=legend_title,
+            background=background,
+            show_axis=show_axis,
         )
 
     def plot_unassigned_transcripts(
@@ -2706,6 +2586,16 @@ try:
 except ImportError:
     _pl_namespace = _load_local_module("_xentools_pl", os.path.join("pl", "__init__.py"))
 
+try:
+    from . import io as _io_namespace
+except ImportError:
+    _io_namespace = _load_local_module("_xentools_io", os.path.join("io", "__init__.py"))
+
+try:
+    from . import utils as _utils_namespace
+except ImportError:
+    _utils_namespace = _load_local_module("_xentools_utils", os.path.join("utils", "__init__.py"))
+
 create_bins = _pl_namespace.create_bins
 bin_expression = _pl_namespace.bin_expression
 create_binned_image = _pl_namespace.create_binned_image
@@ -2717,3 +2607,41 @@ plot_binned_greyscale = _pl_namespace.plot_binned_greyscale
 show_ome_tiff = _pl_namespace.show_ome_tiff
 splat = _pl_namespace.splat
 pl = _pl_namespace
+io = _io_namespace
+utils = _utils_namespace
+frame = _utils_namespace.frame
+um_to_pixels = _utils_namespace.um_to_pixels
+
+__all__ = [
+    "io",
+    "XenData",
+    "LazyTranscripts",
+    "LazyBoundaryGeoDataFrame",
+    "ROI",
+    "ROIClass",
+    "ROICollection",
+    "read_xen_panel",
+    "um_to_pixels",
+    "read_xenium_to_anndata",
+    "frame",
+    "ROI_to_pixels",
+    "import_cell_annotations",
+    "read_ROI_from_csv",
+    "read_ROI_from_geojson",
+    "build_spatial_graph",
+    "build_niches",
+    "evaluate_niche_k_values",
+    "normalize_tp10k",
+    "create_bins",
+    "bin_expression",
+    "create_binned_image",
+    "rasterize",
+    "rasterize_rgb",
+    "plot_binned_rgb",
+    "create_multilayer_image",
+    "plot_binned_greyscale",
+    "show_ome_tiff",
+    "splat",
+    "pl",
+    "utils",
+]

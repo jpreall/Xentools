@@ -49,6 +49,11 @@ def plot_boundaries(
     ax=None,
     figsize: tuple = (8, 8),
     max_cells: Optional[int] = None,
+    show_legend: bool = True,
+    legend_loc: str = "outside right",
+    legend_title: Optional[str] = None,
+    background: str = "black",
+    show_axis: bool = False,
 ):
     """
     Overlay cell or nucleus boundary polygons on an axes.
@@ -61,6 +66,8 @@ def plot_boundaries(
     import matplotlib.pyplot as plt
     from matplotlib.collections import PatchCollection
     from matplotlib.patches import Polygon as MplPolygon
+
+    owns_ax = ax is None
 
     gdf = xdata.cell_boundaries if kind == "cell" else xdata.nucleus_boundaries
     if gdf is None or len(gdf) == 0:
@@ -87,7 +94,11 @@ def plot_boundaries(
 
     if len(gdf) == 0:
         if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
+            fig, ax = plt.subplots(figsize=figsize)
+            fig.patch.set_facecolor(background)
+            ax.set_facecolor(background)
+            if not show_axis:
+                ax.set_axis_off()
         return ax
 
     adata = getattr(xdata, "adata", None)
@@ -156,31 +167,79 @@ def plot_boundaries(
         linewidths=linewidth,
     )
 
-    if ax is None:
-        _, ax = plt.subplots(figsize=figsize)
+    if owns_ax:
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_facecolor(background)
+        ax.set_facecolor(background)
         ax.set_aspect("equal")
-        ax.set_xlim(gdf.geometry.bounds["minx"].min(), gdf.geometry.bounds["maxx"].max())
+        if xmin is not None:
+            ax.set_xlim(xmin, xmax)
+        else:
+            ax.set_xlim(gdf.geometry.bounds["minx"].min(), gdf.geometry.bounds["maxx"].max())
         ax.set_ylim(y_lo, y_hi)
 
     ax.add_collection(pc)
     ax.set_aspect("equal")
+    if owns_ax and not show_axis:
+        ax.set_axis_off()
 
-    if color_by is not None and palette is not None:
+    def _place_legend(ax, handles):
+        title = color_by if legend_title is None else legend_title
+        legend_kwargs = dict(
+            handles=handles,
+            title=title,
+            fontsize="small",
+            title_fontsize="small",
+            labelcolor="white",
+            facecolor="black",
+            edgecolor="black",
+            framealpha=0.85,
+        )
+
+        if legend_loc == "outside right":
+            return ax.legend(
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                borderaxespad=0,
+                **legend_kwargs,
+            )
+        if legend_loc == "outside left":
+            return ax.legend(
+                loc="center right",
+                bbox_to_anchor=(-0.02, 0.5),
+                borderaxespad=0,
+                **legend_kwargs,
+            )
+        if legend_loc == "outside bottom":
+            ncol = min(max(len(handles), 1), 6)
+            return ax.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.02),
+                borderaxespad=0,
+                ncol=ncol,
+                **legend_kwargs,
+            )
+        if legend_loc == "outside top":
+            ncol = min(max(len(handles), 1), 6)
+            return ax.legend(
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.02),
+                borderaxespad=0,
+                ncol=ncol,
+                **legend_kwargs,
+            )
+        return ax.legend(loc=legend_loc, **legend_kwargs)
+
+    if show_legend and color_by is not None and palette is not None:
         from matplotlib.patches import Patch
 
+        observed = set(obs_col.dropna().astype(object)) if "obs_col" in locals() else set()
         handles = [
             Patch(facecolor=(*mcolors.to_rgb(c), face_alpha), edgecolor=edge_rgba, label=str(k))
             for k, c in palette.items()
-            if k in (obs_col.values if "obs_col" in locals() else [])
+            if k in observed
         ]
         if handles:
-            ax.legend(
-                handles=handles,
-                fontsize="small",
-                labelcolor="white",
-                facecolor="black",
-                edgecolor="black",
-                loc="upper right",
-            )
+            _place_legend(ax, handles)
 
     return ax

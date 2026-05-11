@@ -38,7 +38,8 @@ pip install -e .
 import xentools
 
 xd = xentools.XenData("/path/to/xenium_or_atera_output")
-rgb, disp, ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
+ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
+arr = xd.splat(["CCND1", "NHERF1", "OR4F17"], return_array=True)
 ```
 
 Load and subset to a GeoJSON ROI at initialization:
@@ -59,7 +60,7 @@ xd = xentools.XenData(
     roi_file="/path/to/roi.geojson",
 )
 xd.set_active_roi(0)
-rgb, disp, ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
+ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
 ```
 
 Create a real subset only when you want a reduced object:

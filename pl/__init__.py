@@ -8,6 +8,7 @@ Import plotting functions here so users can access them as:
 """
 
 from .boundaries import plot_boundaries
+from .colors import generate_palette, plot_palette
 from .images import show_ome_tiff
 from .transcripts import (
     bin_expression,
@@ -26,9 +27,11 @@ __all__ = [
     "create_binned_image",
     "create_bins",
     "create_multilayer_image",
+    "generate_palette",
     "plot_binned_greyscale",
     "plot_binned_rgb",
     "plot_boundaries",
+    "plot_palette",
     "rasterize",
     "rasterize_rgb",
     "show_ome_tiff",
