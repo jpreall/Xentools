@@ -427,15 +427,17 @@ Progress:
 - added public API tests for root exports and plotting re-export identity
 - removed redundant `read_xen_essentials`
 - moved `read_json` to `utils.misc` / `xentools.utils.read_json`
+- moved `ROI_to_pixels` to `utils.geometry` / `xentools.utils.ROI_to_pixels`
+- moved `import_cell_annotations` to `analysis.annotations`
 - moved palette helpers to `pl.colors` / `xentools.pl.generate_palette`
 - kept segmentation boundary helpers in `xentools.io.read` and removed them from
   package-root exports
-
-Remaining:
-
-- decide whether shadowed legacy plotting function bodies still present in
-  `xentools.py` should be deleted now or only after `XenData` moves to
-  `core/xendata.py`
+- deleted stale shadowed plotting function bodies from `xentools.py`; root
+  plotting names now re-export canonical `xentools.pl` implementations
+- changed general read helpers such as `read_xen_panel` and
+  `read_xenium_to_anndata` to alias `xentools.io.read`
+- removed obsolete `io/zarr_read.py` compatibility wrapper; canonical Zarr
+  readers live in `xentools.io.read.zarr`
 
 ### Deliverable
 

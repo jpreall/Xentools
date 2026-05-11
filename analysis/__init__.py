@@ -1,5 +1,6 @@
 """Analysis helpers for xentools."""
 
+from .annotations import import_cell_annotations
 from .binning import _bin_transcript_dataframe, create_binned_adata
 from .graph import _apply_weights, build_spatial_graph
 from .niches import build_niches, evaluate_niche_k_values
@@ -12,5 +13,6 @@ __all__ = [
     "build_spatial_graph",
     "create_binned_adata",
     "evaluate_niche_k_values",
+    "import_cell_annotations",
     "normalize_tp10k",
 ]

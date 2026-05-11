@@ -12,6 +12,7 @@ from .boundaries import (
 )
 from .cells import (
     CellMatrixLoadResult,
+    _make_gene_panel_df,
     load_xenium_cell_matrix,
     read_classic_analysis_clusters,
     read_xen_panel,
@@ -48,6 +49,7 @@ __all__ = [
     "_open_zarr_group_compat",
     "_read_analysis_zarr",
     "_read_zarr_adata",
+    "_make_gene_panel_df",
     "BoundaryLoadResult",
     "CellMatrixLoadResult",
     "create_polygon",

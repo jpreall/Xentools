@@ -10,6 +10,8 @@ def test_top_level_module_has_explicit_public_api():
         "ROI",
         "ROICollection",
         "read_xen_panel",
+        "ROI_to_pixels",
+        "import_cell_annotations",
         "splat",
         "show_ome_tiff",
         "plot_binned_rgb",
@@ -65,14 +67,19 @@ def test_palette_helpers_live_in_plotting_namespace():
 def test_low_level_helpers_live_in_namespaces():
     import xentools
 
+    assert xentools.read_xen_panel is xentools.io.read.read_xen_panel
+    assert xentools.read_xenium_to_anndata is xentools.io.read.read_xenium_to_anndata
     assert hasattr(xentools.io.read, "create_polygon")
     assert hasattr(xentools.io.read, "import_segmentation_xenium_parquet")
     assert hasattr(xentools.io.read, "import_segmentation_xenium_zarr")
     assert hasattr(xentools.utils, "read_json")
     assert hasattr(xentools.utils, "frame")
     assert hasattr(xentools.utils, "um_to_pixels")
+    assert hasattr(xentools.utils, "ROI_to_pixels")
     assert xentools.frame is xentools.utils.frame
     assert xentools.um_to_pixels is xentools.utils.um_to_pixels
+    assert xentools.ROI_to_pixels is xentools.utils.ROI_to_pixels
+    assert callable(xentools.import_cell_annotations)
 
 
 def test_xendata_is_exported_from_core_module():
