@@ -8,6 +8,7 @@ stable destinations for the staged refactor.
 from .boundaries import LazyBoundaryGeoDataFrame
 from .rois import ROI, ROIClass, ROICollection
 from .transcripts import LazyTranscripts
+from .xendata import XenData
 
 __all__ = [
     "LazyBoundaryGeoDataFrame",
@@ -15,4 +16,5 @@ __all__ = [
     "ROI",
     "ROIClass",
     "ROICollection",
+    "XenData",
 ]

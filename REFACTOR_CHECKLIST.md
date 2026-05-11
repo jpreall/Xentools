@@ -368,14 +368,16 @@ At this point, `XenData` should mostly orchestrate rather than implement.
 
 Keep in `core/xendata.py`:
 
-- [ ] initialization and source selection
-- [ ] object state
-- [ ] thin wrapper methods calling lower-level modules
-- [ ] summary / repr methods
-- [ ] user-facing convenience behavior
+- [x] initialization and source selection
+- [x] object state
+- [x] thin wrapper methods calling lower-level modules
+- [x] summary / repr methods
+- [x] user-facing convenience behavior
 
 Progress:
 
+- [x] `XenData` moved to `core/xendata.py`
+- [x] `xentools.py` re-exports `XenData` as compatibility facade
 - [x] `XenData.write_xenium_explorer()` is now a thin wrapper over `io.write.xenium.write_xenium_explorer()`
 - [x] `XenData.write_geo_submission()` is now a thin wrapper over `io.write.xenium.write_geo_submission()`
 - [x] export coordinate rebasing helpers moved with writer orchestration
@@ -399,6 +401,12 @@ Progress:
 ### Deliverable
 
 - `XenData` becomes readable and maintainable
+
+Status:
+
+- primary object implementation lives in `core/xendata.py`
+- remaining `xentools.py` cleanup is mostly compatibility facade work and stale
+  shadowed plotting helper removal
 
 ## Phase 9: Public API cleanup
 

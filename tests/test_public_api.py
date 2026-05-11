@@ -73,3 +73,10 @@ def test_low_level_helpers_live_in_namespaces():
     assert hasattr(xentools.utils, "um_to_pixels")
     assert xentools.frame is xentools.utils.frame
     assert xentools.um_to_pixels is xentools.utils.um_to_pixels
+
+
+def test_xendata_is_exported_from_core_module():
+    import xentools
+    from xentools.core.xendata import XenData
+
+    assert xentools.XenData is XenData
