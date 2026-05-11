@@ -14,7 +14,7 @@ Working:
 - Xenium data loading and plotting
 - Atera Zarr bundle loading
 - Atera `splat()` and ROI-based plotting workflows
-- basic package-level helpers exposed through `xentools` and `io_utils`
+- basic package-level helpers exposed through `xentools` and `xentools.io`
 
 Pending / not release-ready:
 - Xenium Explorer bundle export

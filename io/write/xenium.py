@@ -1,20 +1,23 @@
 """
-Pure helper functions for writing a Xenium Explorer-compatible bundle.
+Pure helper functions for writing Xenium-compatible outputs.
 
 This module is intentionally standalone — it imports nothing from the parent
-xentools package so it can be loaded by file path inside XenData methods
-without triggering circular imports or package-resolution issues.
+xentools package so it can be loaded by file path when needed without
+triggering circular imports or package-resolution issues.
 
 The orchestration (calling these helpers in the right order) lives in
-xentools.py's XenData.write_xenium_explorer() method.
+`xentools.py` methods such as `XenData.write_xenium_explorer()`.
 """
 
 from __future__ import annotations
 
 import gzip
 import io as _io
+import importlib.util
 import json
 import os
+import shutil
+import sys
 import uuid as _uuid_mod
 import warnings
 import zipfile as _zipfile
@@ -25,6 +28,12 @@ import pandas as pd
 from scipy import sparse
 
 __all__ = [
+    "write_xenium_gene_groups",
+    "_invert_xen_gene_list_dict",
+    "extract_ome_channel_names",
+    "_prepare_cells_dataframe",
+    "_prepare_boundary_dataframe",
+    "_write_10x_mex",
     "_write_experiment_xenium",
     "_write_compressed_mex",
     "_write_analysis_directory",
@@ -34,11 +43,452 @@ __all__ = [
     "_write_cfm_zarr",
     "_write_analysis_zarr",
     "_write_transcripts_zarr",
+    "write_xenium_explorer",
+    "write_geo_submission",
 ]
 
 # ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
+
+def write_xenium_gene_groups(xen_gene_list_dict, output_file):
+    """
+    Write a gene-group CSV readable by Xenium Explorer.
+    """
+    inverted_dict = _invert_xen_gene_list_dict(xen_gene_list_dict)
+
+    with open(output_file, "w", newline="") as f:
+        f.write("gene,group\n")
+        for gene, groups in inverted_dict.items():
+            f.write(f"{gene},{','.join(groups)}\n")
+
+
+def _invert_xen_gene_list_dict(xen_gene_list_dict):
+    """
+    Invert `{group_name: [genes...]}` to `{gene: [group_names...]}`.
+    """
+    from collections import defaultdict
+
+    gene_to_sets = defaultdict(list)
+    for set_name, genes in xen_gene_list_dict.items():
+        for gene in genes:
+            gene_to_sets[gene].append(set_name)
+    return gene_to_sets
+
+
+def _load_sibling_module(module_name, filename):
+    """Load a sibling writer module when this file is imported outside a package."""
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    module_path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load {module_name} from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _image_writer_functions():
+    try:
+        from .images import _write_morphology_for_slice, _write_protein_images_for_slice
+    except ImportError:
+        images = _load_sibling_module("_xentools_io_write_images_for_xenium", "images.py")
+        _write_morphology_for_slice = images._write_morphology_for_slice
+        _write_protein_images_for_slice = images._write_protein_images_for_slice
+    return _write_morphology_for_slice, _write_protein_images_for_slice
+
+
+def extract_ome_channel_names(path):
+    """
+    Extract OME channel names from a TIFF file's OME-XML metadata.
+    """
+    import tifffile
+    import xml.etree.ElementTree as ET
+
+    with tifffile.TiffFile(path) as tif:
+        xml = tif.ome_metadata
+
+    root = ET.fromstring(xml)
+    ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+
+    channels = [
+        ch.attrib.get("Name")
+        for ch in root.findall(".//ome:Image[1]/ome:Pixels/ome:Channel", ns)
+    ]
+
+    return pd.Series(channels, name="channel")
+
+
+def _read_xenium_table_if_present(xenium_folder, filename):
+    path = os.path.join(xenium_folder, filename)
+    if os.path.exists(path):
+        return pd.read_parquet(path)
+    return None
+
+
+def _geometry_to_boundary_rows(cell_id, geometry, label_id):
+    rows = []
+    polygons = [geometry] if geometry.geom_type == "Polygon" else list(geometry.geoms)
+    for poly in polygons:
+        coords = np.asarray(poly.exterior.coords)
+        for x, y in coords:
+            rows.append(
+                {
+                    "cell_id": str(cell_id),
+                    "vertex_x": float(x),
+                    "vertex_y": float(y),
+                    "label_id": int(label_id),
+                }
+            )
+    return rows
+
+
+def _prepare_boundary_dataframe(xdata, boundary_kind="cell"):
+    keep_cells = set(xdata.adata.obs_names.astype(str))
+    if boundary_kind == "cell":
+        filename = "cell_boundaries.parquet"
+        geometry_df = xdata.cell_boundaries
+    elif boundary_kind == "nucleus":
+        filename = "nucleus_boundaries.parquet"
+        geometry_df = xdata.nucleus_boundaries
+    else:
+        raise ValueError("boundary_kind must be 'cell' or 'nucleus'.")
+
+    boundary_df = _read_xenium_table_if_present(xdata.xenium_folder, filename)
+    if boundary_df is not None and "cell_id" in boundary_df.columns:
+        boundary_df["cell_id"] = boundary_df["cell_id"].astype(str)
+        return boundary_df.loc[boundary_df["cell_id"].isin(keep_cells)].copy()
+
+    if geometry_df is None:
+        return pd.DataFrame(columns=["cell_id", "vertex_x", "vertex_y", "label_id"])
+
+    rows = []
+    for label_id, (cell_id, row) in enumerate(geometry_df.iterrows(), start=1):
+        rows.extend(_geometry_to_boundary_rows(cell_id, row.geometry, label_id))
+    return pd.DataFrame(rows, columns=["cell_id", "vertex_x", "vertex_y", "label_id"])
+
+
+def _prepare_cells_dataframe(xdata):
+    keep_cells = set(xdata.adata.obs_names.astype(str))
+    cells_df = _read_xenium_table_if_present(xdata.xenium_folder, "cells.parquet")
+
+    if cells_df is not None and "cell_id" in cells_df.columns:
+        cells_df["cell_id"] = cells_df["cell_id"].astype(str)
+        cells_df = cells_df.loc[cells_df["cell_id"].isin(keep_cells)].copy()
+        return cells_df
+
+    fallback = pd.DataFrame(index=xdata.adata.obs_names.astype(str))
+    fallback.index.name = "cell_id"
+    if "spatial" in xdata.adata.obsm:
+        fallback["x_centroid"] = xdata.adata.obsm["spatial"][:, 0]
+        fallback["y_centroid"] = xdata.adata.obsm["spatial"][:, 1]
+    counts = xdata.adata.layers["counts"] if "counts" in xdata.adata.layers else xdata.adata.X
+    fallback["transcript_counts"] = np.asarray(counts.sum(axis=1)).ravel().astype(int)
+    fallback["total_counts"] = fallback["transcript_counts"]
+    return fallback.reset_index()
+
+
+def _write_10x_mex(adata, output_dir):
+    from pathlib import Path
+    from scipy import io as spio
+
+    output_dir = Path(output_dir)
+    matrix = adata.layers["counts"] if "counts" in adata.layers else adata.X
+    if not sparse.issparse(matrix):
+        matrix = sparse.csr_matrix(matrix)
+    matrix = matrix.transpose().tocsr()
+
+    barcodes = adata.obs_names.astype(str)
+    gene_ids = None
+    for candidate in ("gene_ids", "id", "gene_id"):
+        if candidate in adata.var.columns:
+            gene_ids = adata.var[candidate].astype(str).to_numpy()
+            break
+    if gene_ids is None:
+        gene_ids = adata.var_names.astype(str).to_numpy()
+
+    feature_types = None
+    for candidate in ("feature_types", "feature_type"):
+        if candidate in adata.var.columns:
+            feature_types = adata.var[candidate].astype(str).to_numpy()
+            break
+    if feature_types is None:
+        feature_types = np.repeat("Gene Expression", adata.n_vars)
+
+    features_df = pd.DataFrame({
+        0: gene_ids,
+        1: adata.var_names.astype(str),
+        2: feature_types,
+    })
+
+    pd.Series(barcodes).to_csv(output_dir / "barcodes.tsv", sep="\t", header=False, index=False)
+    features_df.to_csv(output_dir / "features.tsv", sep="\t", header=False, index=False)
+    spio.mmwrite(str(output_dir / "matrix.mtx"), matrix)
+
+
+def _roi_bounds_um(roi):
+    if hasattr(roi, "shapely_bounds") and hasattr(roi, "bounds"):
+        return tuple(map(float, roi.bounds))
+    if hasattr(roi, "bounds"):
+        bounds = tuple(map(float, roi.bounds))
+        if len(bounds) != 4:
+            raise ValueError("ROI bounds must contain four values.")
+        minx, miny, maxx, maxy = bounds
+        return minx, maxx, miny, maxy
+    raise TypeError("ROI-like object must expose bounds.")
+
+
+def _export_crop_origin_um(xdata):
+    subset_roi = getattr(xdata, "subset_roi", None)
+    if subset_roi is None:
+        return 0.0, 0.0
+    xmin, _, ymin, _ = _roi_bounds_um(subset_roi)
+    x0_px = max(0, int(np.floor(xmin / xdata.pixel_size)))
+    y0_px = max(0, int(np.floor(ymin / xdata.pixel_size)))
+    return x0_px * xdata.pixel_size, y0_px * xdata.pixel_size
+
+
+def _rebase_spatial_dataframe(df, origin_um):
+    if df is None:
+        return None
+    x0_um, y0_um = origin_um
+    out = df.copy()
+    x_cols = ["x_location", "x_centroid", "vertex_x"]
+    y_cols = ["y_location", "y_centroid", "vertex_y"]
+    for col in x_cols:
+        if col in out.columns:
+            out[col] = out[col] - x0_um
+    for col in y_cols:
+        if col in out.columns:
+            out[col] = out[col] - y0_um
+    return out
+
+
+def write_xenium_explorer(
+    xdata,
+    output_dir,
+    include_morphology: bool = True,
+    crop_morphology: bool = True,
+    rebase_coordinates: bool = True,
+    pyramidal_morphology: bool = True,
+    pyramid_scale: int = 2,
+    morphology_tile: tuple = (1024, 1024),
+    overwrite: bool = False,
+    verbose: bool = True,
+):
+    """
+    Write a XenData-like object to a Xenium Explorer-compatible bundle.
+    """
+    outdir = Path(output_dir)
+    if outdir.exists() and not overwrite:
+        raise FileExistsError(
+            f"Output directory already exists: {outdir}\n"
+            "Pass overwrite=True to replace it."
+        )
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    crop_origin = _export_crop_origin_um(xdata) if rebase_coordinates else (0.0, 0.0)
+
+    if verbose:
+        print("  Collecting transcripts...", end=" ", flush=True)
+    trans_df = _materialize_transcripts(xdata)
+    trans_df = _rebase_spatial_dataframe(trans_df, crop_origin)
+    n_transcripts = len(trans_df)
+    trans_df.to_parquet(outdir / "transcripts.parquet", index=False)
+    if verbose:
+        print(f"done. ({n_transcripts:,} rows)")
+
+    if verbose:
+        print("  Writing cells.parquet...", end=" ", flush=True)
+    cells_df = _prepare_cells_dataframe(xdata)
+    cells_df = _rebase_spatial_dataframe(cells_df, crop_origin)
+    cells_df.to_parquet(outdir / "cells.parquet", index=False)
+    if verbose:
+        print(f"done. ({len(cells_df):,} cells)")
+
+    if verbose:
+        print("  Writing boundary parquets...", end=" ", flush=True)
+    cell_bdf = _prepare_boundary_dataframe(xdata, boundary_kind="cell")
+    cell_bdf = _rebase_spatial_dataframe(cell_bdf, crop_origin)
+    cell_bdf.to_parquet(outdir / "cell_boundaries.parquet", index=False)
+    nuc_bdf = _prepare_boundary_dataframe(xdata, boundary_kind="nucleus")
+    nuc_bdf = _rebase_spatial_dataframe(nuc_bdf, crop_origin)
+    nuc_bdf.to_parquet(outdir / "nucleus_boundaries.parquet", index=False)
+    if verbose:
+        print("done.")
+
+    if verbose:
+        print("  Writing cell_feature_matrix/...", end=" ", flush=True)
+    _write_compressed_mex(xdata.adata, outdir)
+    if verbose:
+        print(f"done. ({xdata.adata.n_obs:,} cells x {xdata.adata.n_vars:,} features)")
+
+    if verbose:
+        print("  Writing analysis/...", end=" ", flush=True)
+    _write_analysis_directory(xdata, outdir)
+    if verbose:
+        print("done.")
+
+    panel_src = os.path.join(xdata.xenium_folder, "gene_panel.json")
+    if os.path.exists(panel_src):
+        shutil.copy2(panel_src, outdir / "gene_panel.json")
+
+    if verbose:
+        print("  Writing cells.zarr.zip...", end=" ", flush=True)
+    obs_names = xdata.adata.obs_names.astype(str).tolist()
+    pixel_size = float(xdata.xenium_metadata.get("pixel_size", 0.2125))
+    _write_cells_zarr(obs_names, cells_df, cell_bdf, nuc_bdf, outdir, pixel_size=pixel_size)
+    if verbose:
+        print("done.")
+
+    if verbose:
+        print("  Writing cell_feature_matrix.zarr.zip...", end=" ", flush=True)
+    _write_cfm_zarr(xdata.adata, obs_names, outdir)
+    if verbose:
+        print("done.")
+
+    if verbose:
+        print("  Writing analysis.zarr.zip...", end=" ", flush=True)
+    _write_analysis_zarr(xdata.adata, obs_names, outdir)
+    if verbose:
+        print("done.")
+
+    if verbose:
+        print("  Writing transcripts.zarr.zip...", end=" ", flush=True)
+    source_fov_names = _load_source_fov_names(xdata)
+    _write_transcripts_zarr(trans_df, outdir, fov_names=source_fov_names)
+    if verbose:
+        print(f"done. ({n_transcripts:,} transcripts)")
+
+    xenium_explorer_files = {
+        "cells_zarr_filepath": "cells.zarr.zip",
+        "cell_features_zarr_filepath": "cell_feature_matrix.zarr.zip",
+        "analysis_zarr_filepath": "analysis.zarr.zip",
+        "transcripts_zarr_filepath": "transcripts.zarr.zip",
+    }
+
+    if verbose:
+        print("  Writing experiment.xenium...", end=" ", flush=True)
+    _write_experiment_xenium(
+        xdata,
+        outdir,
+        n_transcripts=n_transcripts,
+        xenium_explorer_files=xenium_explorer_files,
+    )
+    if verbose:
+        print("done.")
+
+    if include_morphology:
+        morph_src = os.path.join(xdata.xenium_folder, "morphology.ome.tif")
+        if os.path.exists(morph_src):
+            if verbose:
+                print("  Writing morphology.ome.tif...", end=" ", flush=True)
+            write_morphology, _ = _image_writer_functions()
+            write_morphology(
+                xdata,
+                output_path=outdir / "morphology.ome.tif",
+                crop=crop_morphology,
+                pyramidal=pyramidal_morphology,
+                pyramid_scale=pyramid_scale,
+                tile=morphology_tile,
+            )
+            if verbose:
+                print("done.")
+        elif verbose:
+            print("  morphology.ome.tif not found - skipping.")
+
+    if verbose:
+        print(f"\nXenium Explorer bundle written to: {outdir}")
+
+
+def write_geo_submission(
+    xdata,
+    output_dir,
+    matrix_format: str = "mex",
+    include_morphology: bool = True,
+    crop_morphology: bool = True,
+    include_protein_images: bool = True,
+    crop_protein_images: bool = True,
+    rebase_coordinates: bool = True,
+    pyramidal_morphology: bool = True,
+    pyramid_scale: int = 2,
+    morphology_tile: tuple[int, int] = (1024, 1024),
+    overwrite: bool = False,
+):
+    """
+    Write a XenData-like slice to GEO-friendly Xenium-style outputs.
+    """
+    if matrix_format.lower() != "mex":
+        raise ValueError("Only matrix_format='mex' is currently supported.")
+
+    outdir = Path(output_dir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    required_outputs = [
+        outdir / "transcripts.parquet",
+        outdir / "barcodes.tsv",
+        outdir / "features.tsv",
+        outdir / "matrix.mtx",
+        outdir / "cells.parquet",
+        outdir / "cell_boundaries.parquet",
+        outdir / "nucleus_boundaries.parquet",
+    ]
+    if include_morphology:
+        required_outputs.append(outdir / "morphology.ome.tif")
+    if include_protein_images and xdata.protein_images is not None:
+        required_outputs.extend(
+            outdir / "morphology_focus" / name
+            for name in xdata.protein_images["filenames"]
+        )
+
+    existing = [path for path in required_outputs if path.exists()]
+    if existing and not overwrite:
+        existing_str = ", ".join(path.name for path in existing)
+        raise FileExistsError(f"Refusing to overwrite existing output files: {existing_str}")
+
+    crop_origin_um = _export_crop_origin_um(xdata) if rebase_coordinates else (0.0, 0.0)
+
+    transcripts_df = _materialize_transcripts(xdata)
+    transcripts_df = _rebase_spatial_dataframe(transcripts_df, crop_origin_um)
+    transcripts_df.to_parquet(outdir / "transcripts.parquet", index=False)
+
+    cells_df = _prepare_cells_dataframe(xdata)
+    cells_df = _rebase_spatial_dataframe(cells_df, crop_origin_um)
+    cells_df.to_parquet(outdir / "cells.parquet", index=False)
+
+    cell_boundary_df = _prepare_boundary_dataframe(xdata, boundary_kind="cell")
+    cell_boundary_df = _rebase_spatial_dataframe(cell_boundary_df, crop_origin_um)
+    cell_boundary_df.to_parquet(outdir / "cell_boundaries.parquet", index=False)
+
+    nucleus_boundary_df = _prepare_boundary_dataframe(xdata, boundary_kind="nucleus")
+    nucleus_boundary_df = _rebase_spatial_dataframe(nucleus_boundary_df, crop_origin_um)
+    nucleus_boundary_df.to_parquet(outdir / "nucleus_boundaries.parquet", index=False)
+
+    _write_10x_mex(xdata.adata, outdir)
+
+    write_morphology, write_protein_images = _image_writer_functions()
+    if include_morphology:
+        write_morphology(
+            xdata,
+            output_path=outdir / "morphology.ome.tif",
+            crop=crop_morphology,
+            pyramidal=pyramidal_morphology,
+            pyramid_scale=pyramid_scale,
+            tile=morphology_tile,
+        )
+
+    if include_protein_images and xdata.protein_images is not None:
+        write_protein_images(
+            xdata,
+            output_dir=outdir / "morphology_focus",
+            crop=crop_protein_images,
+            pyramid_scale=pyramid_scale,
+            tile=morphology_tile,
+        )
+
+
 
 def _dedup_zarr_zip(zip_path):
     """
