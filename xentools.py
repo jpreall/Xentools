@@ -35,6 +35,21 @@ def _load_local_module(module_name, relative_path):
     spec.loader.exec_module(module)
     return module
 
+
+def _is_lazy_transcripts(obj) -> bool:
+    """
+    Detect LazyTranscripts-like objects without relying on class identity.
+
+    Standalone ``sys.path.append(repo); import xentools`` imports can load the
+    same source class under multiple module names, so ``isinstance`` is brittle.
+    """
+    return (
+        hasattr(obj, "query")
+        and callable(getattr(obj, "query"))
+        and hasattr(obj, "_gene_names")
+        and hasattr(obj, "_tile_meta")
+    )
+
 try:
     from .analysis.binning import create_binned_adata as _create_binned_adata
     from .analysis.graph import _apply_weights, build_spatial_graph
@@ -468,13 +483,13 @@ class XenData:
                 self.subset_to_roi(crop_target)
 
     def update_cell_names(self):
-        if isinstance(self.trans, LazyTranscripts):
+        if _is_lazy_transcripts(self.trans):
             # Transcripts are lazy — cell list lives in adata
             if self.adata is not None:
                 self._cell_names = self.adata.obs_names.tolist()
             else:
                 self._cell_names = []
-        elif 'cell_id' in self.trans.columns:
+        elif hasattr(self.trans, "columns") and 'cell_id' in self.trans.columns:
             self._cell_names = sorted(self.trans['cell_id'].unique())
             if 'UNASSIGNED' in self._cell_names:
                 self._cell_names.remove('UNASSIGNED')
@@ -500,7 +515,7 @@ class XenData:
         Returns the frame of the transcript data as a 2D numpy array.
         The frame is defined by the minimum and maximum x and y coordinates of the transcripts.
         """
-        if isinstance(self.trans, LazyTranscripts):
+        if _is_lazy_transcripts(self.trans):
             return self.trans.frame
         return frame(self.trans)
     
@@ -579,7 +594,7 @@ class XenData:
         total_clusters = len(self.clusters['Cluster'].unique()) if self.clusters is not None else 0
         transcript_repr = (
             "LazyTranscripts[zarr]"
-            if isinstance(self.trans, LazyTranscripts)
+            if _is_lazy_transcripts(self.trans)
             else f"DataFrame[parquet] ({len(self.trans):,} rows)"
         )
         adata_repr = (
@@ -629,7 +644,7 @@ class XenData:
         lines = [f"XenData object: {self.name}"]
         lines.append(_line("Folder", self.xenium_folder))
 
-        if isinstance(self.trans, LazyTranscripts):
+        if _is_lazy_transcripts(self.trans):
             trans_desc = (
                 f"`trans`: LazyTranscripts[zarr] "
                 f"({self.trans.n_transcripts:,} transcripts, {len(self.trans._gene_names):,} genes)"
@@ -827,7 +842,7 @@ class XenData:
         roi_polygon = roi_obj.geometry
         
         # Apply the filter to the DataFrame
-        if isinstance(self.trans, LazyTranscripts):
+        if _is_lazy_transcripts(self.trans):
             # Use polygon bbox for efficient tile selection, then apply exact polygon mask
             df = roi_obj.query_lazy_transcripts(self.trans, quality="all")
             self.trans = roi_obj.crop_dataframe(df).copy()
@@ -2478,12 +2493,12 @@ def splat(
         df = data.trans
     elif isinstance(data, pd.DataFrame):
         df = data
-    elif isinstance(data, LazyTranscripts):
+    elif _is_lazy_transcripts(data):
         df = data
     else:
         raise ValueError("data must be XenData, LazyTranscripts, or pd.DataFrame")
 
-    if isinstance(df, LazyTranscripts):
+    if _is_lazy_transcripts(df):
         # Resolve the gene list so the query pre-filters to only needed genes
         if genes is None:
             query_genes = None
