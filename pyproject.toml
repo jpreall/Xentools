@@ -29,6 +29,19 @@ test = [
     "pytest",
 ]
 
+[tool.setuptools]
+package-dir = {"xentools" = "."}
+packages = [
+    "xentools",
+    "xentools.analysis",
+    "xentools.core",
+    "xentools.io",
+    "xentools.io.read",
+    "xentools.io.write",
+    "xentools.pl",
+    "xentools.utils",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
