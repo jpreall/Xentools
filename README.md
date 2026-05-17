@@ -2,6 +2,8 @@
 
 `xentools` is a lightweight analysis and visualization toolkit for 10x Xenium-style spatial transcriptomics outputs, with working support for both standard Xenium bundles and basic Atera whole-transcriptome Zarr bundles.
 
+Documentation: https://xentools.readthedocs.io/
+
 This snapshot is being frozen as a usable baseline for:
 - loading Xenium and Atera datasets into a `XenData` object
 - reading transcript, cell, boundary, image, and clustering data
