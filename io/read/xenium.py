@@ -56,13 +56,19 @@ def create_polygon(df):
     return Polygon(zip(df.vertex_x, df.vertex_y))
 
 
-def import_segmentation_xenium_parquet(boundaries_file):
-    """
-    Import cell or nucleus boundaries from a Xenium `*.parquet` boundary file.
-    """
+def _empty_boundary_geodataframe():
     import geopandas as gpd
 
-    boundaries_df = pd.read_parquet(boundaries_file)
+    return gpd.GeoDataFrame({"geometry": []}, geometry="geometry").rename_axis("cell_id")
+
+
+def _boundary_rows_to_geodataframe(boundaries_df):
+    import geopandas as gpd
+
+    if boundaries_df.empty:
+        return _empty_boundary_geodataframe()
+
+    boundaries_df = boundaries_df.copy()
     boundaries_df.set_index("cell_id", inplace=True)
     boundaries_df.index = boundaries_df.index.astype("str")
 
@@ -72,7 +78,85 @@ def import_segmentation_xenium_parquet(boundaries_file):
     )
 
 
-def import_segmentation_xenium_zarr(cells_zarr_file, kind: Literal["cell", "nucleus"] = "cell"):
+def _read_boundary_parquet_for_bounds(boundaries_file, bounds):
+    """
+    Read only boundary polygons likely to overlap a bounded viewport.
+
+    The first parquet read identifies candidate cells with at least one vertex
+    inside the requested bounds. The second read pulls all vertices for those
+    cells, so polygons are complete rather than clipped to the viewport.
+    """
+    xmin, xmax, ymin, ymax = bounds
+    columns = ["cell_id", "vertex_x", "vertex_y"]
+
+    candidate_rows = pd.read_parquet(
+        boundaries_file,
+        columns=columns,
+        filters=[
+            ("vertex_x", ">=", xmin),
+            ("vertex_x", "<=", xmax),
+            ("vertex_y", ">=", ymin),
+            ("vertex_y", "<=", ymax),
+        ],
+    )
+    if candidate_rows.empty:
+        return candidate_rows
+
+    candidate_ids = candidate_rows["cell_id"].astype(str).unique().tolist()
+    if not candidate_ids:
+        return candidate_rows.iloc[0:0]
+
+    try:
+        return pd.read_parquet(
+            boundaries_file,
+            columns=columns,
+            filters=[("cell_id", "in", candidate_ids)],
+        )
+    except Exception:
+        all_rows = pd.read_parquet(boundaries_file, columns=columns)
+        return all_rows[all_rows["cell_id"].astype(str).isin(candidate_ids)]
+
+
+def _read_boundary_parquet_for_cell_ids(boundaries_file, cell_ids):
+    columns = ["cell_id", "vertex_x", "vertex_y"]
+    cell_ids = [str(cell_id) for cell_id in cell_ids]
+    if not cell_ids:
+        return pd.DataFrame(columns=columns)
+
+    try:
+        return pd.read_parquet(
+            boundaries_file,
+            columns=columns,
+            filters=[("cell_id", "in", cell_ids)],
+        )
+    except Exception:
+        all_rows = pd.read_parquet(boundaries_file, columns=columns)
+        return all_rows[all_rows["cell_id"].astype(str).isin(cell_ids)]
+
+
+def import_segmentation_xenium_parquet(boundaries_file, bounds=None, cell_ids=None):
+    """
+    Import cell or nucleus boundaries from a Xenium `*.parquet` boundary file.
+
+    When ``bounds`` is supplied as ``(xmin, xmax, ymin, ymax)``, only polygons
+    with vertices in that viewport are constructed. This keeps ROI plotting
+    fast without forcing full-boundary materialization at ``XenData`` init.
+    """
+    if cell_ids is not None:
+        boundaries_df = _read_boundary_parquet_for_cell_ids(boundaries_file, cell_ids)
+    elif bounds is None:
+        boundaries_df = pd.read_parquet(boundaries_file)
+    else:
+        boundaries_df = _read_boundary_parquet_for_bounds(boundaries_file, bounds)
+    return _boundary_rows_to_geodataframe(boundaries_df)
+
+
+def import_segmentation_xenium_zarr(
+    cells_zarr_file,
+    kind: Literal["cell", "nucleus"] = "cell",
+    bounds=None,
+    cell_ids=None,
+):
     """
     Import cell or nucleus boundary polygons from `cells.zarr.zip`.
     """
@@ -85,12 +169,39 @@ def import_segmentation_xenium_zarr(cells_zarr_file, kind: Literal["cell", "nucl
     try:
         root = _open_zarr_group_compat(zarr, store, mode="r", force_v2=True)
         cell_ids_raw = root["cell_id"][:]
-        cell_ids = _encode_xenium_cell_ids(cell_ids_raw[:, 0], cell_ids_raw[:, 1]).astype(str)
+        encoded_cell_ids = _encode_xenium_cell_ids(cell_ids_raw[:, 0], cell_ids_raw[:, 1]).astype(str)
+        selected_cell_indices = None
+        if cell_ids is not None:
+            requested = pd.Index([str(cell_id) for cell_id in cell_ids])
+            selected_cell_indices = np.flatnonzero(pd.Index(encoded_cell_ids).isin(requested))
+        elif bounds is not None:
+            xmin, xmax, ymin, ymax = bounds
+            bboxes = root["bboxes"][:].reshape(-1, 4)
+            selected_cell_indices = np.flatnonzero(
+                (bboxes[:, 0] <= xmax)
+                & (bboxes[:, 2] >= xmin)
+                & (bboxes[:, 1] <= ymax)
+                & (bboxes[:, 3] >= ymin)
+            )
 
         grp = root[f"polygon_sets/{set_idx}"]
         cell_index = grp["cell_index"][:].astype(np.int64)
         num_vertices = grp["num_vertices"][:].astype(np.int64)
-        vertices = grp["vertices"][:]
+        if selected_cell_indices is None:
+            row_indices = np.arange(len(cell_index), dtype=np.int64)
+        else:
+            row_indices = np.flatnonzero(np.isin(cell_index, selected_cell_indices))
+
+        if len(row_indices) == 0:
+            return _empty_boundary_geodataframe()
+
+        cell_index = cell_index[row_indices]
+        num_vertices = num_vertices[row_indices]
+        vertices_array = grp["vertices"]
+        try:
+            vertices = vertices_array.get_orthogonal_selection((row_indices, slice(None)))
+        except AttributeError:
+            vertices = vertices_array[row_indices, :]
     finally:
         store.close()
 
@@ -102,7 +213,7 @@ def import_segmentation_xenium_zarr(cells_zarr_file, kind: Literal["cell", "nucl
         coords = flat.reshape(-1, 2)
         if len(coords) < 4:
             continue
-        geometries[str(cell_ids[idx])] = Polygon(coords)
+        geometries[str(encoded_cell_ids[idx])] = Polygon(coords)
 
     gdf = gpd.GeoDataFrame(
         {"geometry": pd.Series(geometries, dtype=object)},

@@ -14,6 +14,9 @@ Working:
 - Xenium data loading and plotting
 - Atera Zarr bundle loading
 - Atera `splat()` and ROI-based plotting workflows
+- lazy boundary registration for faster startup; cell/nucleus boundary polygons
+  are materialized only when needed, and ROI-bounded boundary plots load only
+  the relevant polygons when possible
 - basic package-level helpers exposed through `xentools` and `xentools.io`
 
 Pending / not release-ready:
@@ -41,6 +44,11 @@ xd = xentools.XenData("/path/to/xenium_or_atera_output")
 ax = xd.splat(["CCND1", "NHERF1", "OR4F17"])
 arr = xd.splat(["CCND1", "NHERF1", "OR4F17"], return_array=True)
 ```
+
+By default, cell and nucleus boundaries are lazy. This keeps initialization
+fast for large Xenium outputs; plotting a bounded region loads only the
+boundaries needed for that view when possible. Set `lazy_boundaries=False` if
+you explicitly want all boundary polygons materialized at initialization.
 
 Load and subset to a GeoJSON ROI at initialization:
 
@@ -74,6 +82,14 @@ Overlay boundaries on DAPI:
 ```python
 ax = xd.show_image("DAPI", figsize=(10, 10))
 xd.plot_boundaries(kind="cell", color_by="Cluster", ax=ax)
+```
+
+Fill cell polygons by expression of one gene, or by summed expression of a gene
+set:
+
+```python
+ax = xd.plot_cells(genes="EPCAM", cmap="magma")
+ax = xd.plot_cells(genes=["EPCAM", "KRT19"], cmap="magma")
 ```
 
 ## Notes

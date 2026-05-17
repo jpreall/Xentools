@@ -105,7 +105,7 @@ def load_xenium_boundaries(
     xenium_folder,
     *,
     boundary_source: Literal["auto", "parquet", "zarr"] = "auto",
-    lazy_boundaries: bool = False,
+    lazy_boundaries: bool = True,
     verbose: bool = True,
 ) -> BoundaryLoadResult:
     """Load or lazily register Xenium cell and nucleus boundaries."""
@@ -119,13 +119,41 @@ def load_xenium_boundaries(
     cells_zarr_file = os.path.join(xenium_folder, "cells.zarr.zip")
 
     if resolved_boundary_source == "parquet":
-        if verbose:
-            print("Reading in cell boundaries")
-        cell_boundaries = import_segmentation_xenium_parquet(cell_boundaries_file)
+        if lazy_boundaries:
+            if verbose:
+                print("Registering lazy parquet-backed cell boundaries")
+            cell_boundaries = LazyBoundaryGeoDataFrame(
+                lambda: import_segmentation_xenium_parquet(cell_boundaries_file),
+                label="cell boundaries from cell_boundaries.parquet",
+                subset_loader=lambda bounds: import_segmentation_xenium_parquet(
+                    cell_boundaries_file,
+                    bounds=bounds,
+                ),
+                id_subset_loader=lambda cell_ids: import_segmentation_xenium_parquet(
+                    cell_boundaries_file,
+                    cell_ids=cell_ids,
+                ),
+            )
+            nucleus_boundaries = LazyBoundaryGeoDataFrame(
+                lambda: import_segmentation_xenium_parquet(nuc_boundaries_file),
+                label="nucleus boundaries from nucleus_boundaries.parquet",
+                subset_loader=lambda bounds: import_segmentation_xenium_parquet(
+                    nuc_boundaries_file,
+                    bounds=bounds,
+                ),
+                id_subset_loader=lambda cell_ids: import_segmentation_xenium_parquet(
+                    nuc_boundaries_file,
+                    cell_ids=cell_ids,
+                ),
+            )
+        else:
+            if verbose:
+                print("Reading in cell boundaries")
+            cell_boundaries = import_segmentation_xenium_parquet(cell_boundaries_file)
 
-        if verbose:
-            print("Reading in nucleus boundaries")
-        nucleus_boundaries = import_segmentation_xenium_parquet(nuc_boundaries_file)
+            if verbose:
+                print("Reading in nucleus boundaries")
+            nucleus_boundaries = import_segmentation_xenium_parquet(nuc_boundaries_file)
 
     elif resolved_boundary_source == "zarr":
         if lazy_boundaries:
@@ -134,10 +162,30 @@ def load_xenium_boundaries(
             cell_boundaries = LazyBoundaryGeoDataFrame(
                 lambda: import_segmentation_xenium_zarr(cells_zarr_file, kind="cell"),
                 label="cell boundaries from cells.zarr.zip",
+                subset_loader=lambda bounds: import_segmentation_xenium_zarr(
+                    cells_zarr_file,
+                    kind="cell",
+                    bounds=bounds,
+                ),
+                id_subset_loader=lambda cell_ids: import_segmentation_xenium_zarr(
+                    cells_zarr_file,
+                    kind="cell",
+                    cell_ids=cell_ids,
+                ),
             )
             nucleus_boundaries = LazyBoundaryGeoDataFrame(
                 lambda: import_segmentation_xenium_zarr(cells_zarr_file, kind="nucleus"),
                 label="nucleus boundaries from cells.zarr.zip",
+                subset_loader=lambda bounds: import_segmentation_xenium_zarr(
+                    cells_zarr_file,
+                    kind="nucleus",
+                    bounds=bounds,
+                ),
+                id_subset_loader=lambda cell_ids: import_segmentation_xenium_zarr(
+                    cells_zarr_file,
+                    kind="nucleus",
+                    cell_ids=cell_ids,
+                ),
             )
         else:
             if verbose:
@@ -156,5 +204,5 @@ def load_xenium_boundaries(
         cell_boundaries=cell_boundaries,
         nucleus_boundaries=nucleus_boundaries,
         boundary_source=resolved_boundary_source,
-        lazy_boundaries=bool(lazy_boundaries and resolved_boundary_source == "zarr"),
+        lazy_boundaries=bool(lazy_boundaries and resolved_boundary_source is not None),
     )

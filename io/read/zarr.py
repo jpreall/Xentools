@@ -58,6 +58,63 @@ def _open_zarr_group_compat(zarr_module, store, mode="r", *, force_v2=False):
     return zarr_module.open_group(**kwargs)
 
 
+def _zarr_keys(group, key_method):
+    """Return group keys across zarr versions, where key methods may be generators."""
+    return set(getattr(group, key_method)())
+
+
+def _read_cell_feature_matrix_arrays(cf, attrs):
+    """
+    Read Xenium cell-feature matrix arrays across observed zarr layouts.
+
+    Newer bundles store a cell-major CSC representation at ``cell_features/csc``.
+    Older bundles store a feature-major CSC representation directly under
+    ``cell_features`` as ``data``, ``indices``, and ``indptr``.
+    """
+    from scipy import sparse
+
+    cfm_cell_ids_raw = cf["cell_id"][:]
+    array_keys = _zarr_keys(cf, "array_keys")
+    group_keys = _zarr_keys(cf, "group_keys")
+
+    if "csc" in group_keys:
+        csc_data = cf["csc/data"][:]
+        csc_indices = cf["csc/indices"][:].astype(np.int32)
+        csc_indptr = cf["csc/indptr"][:]
+
+        if "indptr" in array_keys:
+            n_features = int(cf["indptr"].shape[0]) - 1
+        else:
+            n_features = int(attrs.get("number_features", len(attrs.get("feature_keys", []))))
+        n_cells = int(csc_indptr.shape[0]) - 1
+
+        X = sparse.csc_matrix(
+            (csc_data, csc_indices, csc_indptr),
+            shape=(n_features, n_cells),
+        ).T.tocsr()
+        return X, cfm_cell_ids_raw, n_cells, n_features
+
+    if {"data", "indices", "indptr"}.issubset(array_keys):
+        data = cf["data"][:]
+        indices = cf["indices"][:].astype(np.int32)
+        indptr = cf["indptr"][:]
+
+        n_features = int(attrs.get("number_features", len(indptr) - 1))
+        n_cells = int(attrs.get("number_cells", cfm_cell_ids_raw.shape[0]))
+
+        X = sparse.csc_matrix(
+            (data, indices, indptr),
+            shape=(n_cells, n_features),
+        ).tocsr()
+        return X, cfm_cell_ids_raw, n_cells, n_features
+
+    raise KeyError(
+        "Unsupported cell_feature_matrix.zarr.zip layout: expected either "
+        "cell_features/csc/{data,indices,indptr} or flat "
+        "cell_features/{data,indices,indptr}."
+    )
+
+
 def _read_zarr_adata(folder, verbose=True, include_non_gene_features=False):
     """
     Build an AnnData object from the zarr-format cell feature matrix and cell summaries.
@@ -71,7 +128,6 @@ def _read_zarr_adata(folder, verbose=True, include_non_gene_features=False):
     """
     import anndata as ad
     import zarr
-    from scipy import sparse
 
     cfm_path = os.path.join(folder, "cell_feature_matrix.zarr.zip")
     cells_path = os.path.join(folder, "cells.zarr.zip")
@@ -82,20 +138,8 @@ def _read_zarr_adata(folder, verbose=True, include_non_gene_features=False):
     try:
         grp_cfm = _open_zarr_group_compat(zarr, store_cfm, mode="r", force_v2=True)
         cf = grp_cfm["cell_features"]
-
-        csc_data = cf["csc/data"][:]
-        csc_indices = cf["csc/indices"][:].astype(np.int32)
-        csc_indptr = cf["csc/indptr"][:]
-
-        n_features = int(cf["indptr"].shape[0]) - 1
-        n_cells = int(csc_indptr.shape[0]) - 1
-
-        X = sparse.csc_matrix(
-            (csc_data, csc_indices, csc_indptr),
-            shape=(n_features, n_cells),
-        ).T.tocsr()
-
-        cfm_cell_ids_raw = cf["cell_id"][:]
+        attrs = dict(cf.attrs)
+        X, cfm_cell_ids_raw, n_cells, n_features = _read_cell_feature_matrix_arrays(cf, attrs)
         cfm_cell_ids = cfm_cell_ids_raw[:, 0]
     finally:
         store_cfm.close()
@@ -103,10 +147,11 @@ def _read_zarr_adata(folder, verbose=True, include_non_gene_features=False):
     if verbose:
         print(f"done. ({n_cells:,} cells × {n_features:,} features)")
 
-    import zipfile
+    if not attrs:
+        import zipfile
 
-    with zipfile.ZipFile(cfm_path) as zf:
-        attrs = json.loads(zf.read("cell_features/.zattrs").decode())
+        with zipfile.ZipFile(cfm_path) as zf:
+            attrs = json.loads(zf.read("cell_features/.zattrs").decode())
     var = pd.DataFrame(
         {
             "gene_ids": attrs["feature_ids"],

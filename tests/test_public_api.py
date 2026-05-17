@@ -14,6 +14,7 @@ def test_top_level_module_has_explicit_public_api():
         "import_cell_annotations",
         "splat",
         "show_ome_tiff",
+        "plot_cells",
         "plot_binned_rgb",
         "build_niches",
         "evaluate_niche_k_values",
@@ -50,6 +51,7 @@ def test_plotting_reexports_point_to_pl_namespace():
 
     assert xentools.splat is xentools.pl.splat
     assert xentools.show_ome_tiff is xentools.pl.show_ome_tiff
+    assert xentools.plot_cells is xentools.pl.plot_cells
     assert xentools.plot_binned_rgb is xentools.pl.plot_binned_rgb
     assert xentools.rasterize is xentools.pl.rasterize
 

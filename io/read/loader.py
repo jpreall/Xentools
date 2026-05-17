@@ -26,22 +26,30 @@ def _load_local_module(module_name, relative_path):
 
 try:
     from .boundaries import BoundaryLoadResult, load_xenium_boundaries
-    from .cells import CellMatrixLoadResult, load_xenium_cell_matrix
-    from .metadata import XeniumMetadata, load_xenium_metadata
-    from .transcripts import TranscriptLoadResult, load_xenium_transcripts
 except ImportError:
     _boundaries = _load_local_module("_xentools_io_read_boundaries_for_loader", "boundaries.py")
-    _cells = _load_local_module("_xentools_io_read_cells_for_loader", "cells.py")
-    _metadata = _load_local_module("_xentools_io_read_metadata_for_loader", "metadata.py")
-    _transcripts = _load_local_module("_xentools_io_read_transcripts_for_loader", "transcripts.py")
-
     BoundaryLoadResult = _boundaries.BoundaryLoadResult
-    CellMatrixLoadResult = _cells.CellMatrixLoadResult
-    TranscriptLoadResult = _transcripts.TranscriptLoadResult
-    XeniumMetadata = _metadata.XeniumMetadata
     load_xenium_boundaries = _boundaries.load_xenium_boundaries
+
+try:
+    from .cells import CellMatrixLoadResult, load_xenium_cell_matrix
+except ImportError:
+    _cells = _load_local_module("_xentools_io_read_cells_for_loader", "cells.py")
+    CellMatrixLoadResult = _cells.CellMatrixLoadResult
     load_xenium_cell_matrix = _cells.load_xenium_cell_matrix
+
+try:
+    from .metadata import XeniumMetadata, load_xenium_metadata
+except ImportError:
+    _metadata = _load_local_module("_xentools_io_read_metadata_for_loader", "metadata.py")
+    XeniumMetadata = _metadata.XeniumMetadata
     load_xenium_metadata = _metadata.load_xenium_metadata
+
+try:
+    from .transcripts import TranscriptLoadResult, load_xenium_transcripts
+except ImportError:
+    _transcripts = _load_local_module("_xentools_io_read_transcripts_for_loader", "transcripts.py")
+    TranscriptLoadResult = _transcripts.TranscriptLoadResult
     load_xenium_transcripts = _transcripts.load_xenium_transcripts
 
 
@@ -65,7 +73,7 @@ def load_xenium_folder(
     cache_threshold: int = 5_000_000,
     eager_transcript_threshold: int = 20_000_000,
     boundary_source: Literal["auto", "parquet", "zarr"] = "auto",
-    lazy_boundaries: bool = False,
+    lazy_boundaries: bool = True,
     include_non_gene_features: bool = False,
     verbose: bool = True,
 ) -> XeniumLoadResult:

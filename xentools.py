@@ -133,6 +133,8 @@ rasterize_rgb = _pl_namespace.rasterize_rgb
 plot_binned_rgb = _pl_namespace.plot_binned_rgb
 create_multilayer_image = _pl_namespace.create_multilayer_image
 plot_binned_greyscale = _pl_namespace.plot_binned_greyscale
+plot_boundaries = _pl_namespace.plot_boundaries
+plot_cells = _pl_namespace.plot_cells
 show_ome_tiff = _pl_namespace.show_ome_tiff
 splat = _pl_namespace.splat
 pl = _pl_namespace
@@ -173,6 +175,8 @@ __all__ = [
     "plot_binned_rgb",
     "create_multilayer_image",
     "plot_binned_greyscale",
+    "plot_boundaries",
+    "plot_cells",
     "show_ome_tiff",
     "splat",
     "pl",

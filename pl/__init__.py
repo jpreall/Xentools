@@ -7,7 +7,7 @@ Import plotting functions here so users can access them as:
     xentools.pl.show_ome_tiff(...)
 """
 
-from .boundaries import plot_boundaries
+from .boundaries import plot_boundaries, plot_cells
 from .colors import generate_palette, plot_palette
 from .images import show_ome_tiff
 from .transcripts import (
@@ -31,6 +31,7 @@ __all__ = [
     "plot_binned_greyscale",
     "plot_binned_rgb",
     "plot_boundaries",
+    "plot_cells",
     "plot_palette",
     "rasterize",
     "rasterize_rgb",

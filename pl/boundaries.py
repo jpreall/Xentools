@@ -12,7 +12,7 @@ try:
 except ImportError:
     _roi_bounds_um = _load_local_module("_xentools_core_rois_for_pl_boundaries", "core/rois.py")._roi_bounds_um
 
-__all__ = ["plot_boundaries"]
+__all__ = ["plot_boundaries", "plot_cells"]
 
 
 def _generate_palette(n):
@@ -35,15 +35,72 @@ def _generate_palette(n):
     ]
 
 
+def _normalize_gene_list(genes):
+    if genes is None:
+        return None
+    if isinstance(genes, str):
+        return [genes]
+    return list(genes)
+
+
+def _matrix_to_1d(arr):
+    if hasattr(arr, "toarray"):
+        arr = arr.toarray()
+    arr = np.asarray(arr)
+    return arr.ravel()
+
+
+def _expression_series(adata, genes, layer=None):
+    genes = _normalize_gene_list(genes)
+    if not genes:
+        return None, None
+
+    missing = [gene for gene in genes if gene not in adata.var_names]
+    if missing:
+        raise ValueError(f"Gene(s) not found in adata.var_names: {missing}")
+
+    matrix = adata[:, genes].layers[layer] if layer is not None else adata[:, genes].X
+    if len(genes) == 1:
+        values = _matrix_to_1d(matrix)
+        label = genes[0]
+    else:
+        values = _matrix_to_1d(matrix.sum(axis=1))
+        label = " + ".join(genes)
+    return pd.Series(values, index=adata.obs_names, dtype=float), label
+
+
+def _nearest_obs_values(gdf, adata, values):
+    from scipy.spatial import KDTree
+
+    obs = adata.obs[["x_centroid", "y_centroid"]].copy()
+    obs["_value"] = values.reindex(adata.obs_names)
+    obs = obs.dropna(subset=["x_centroid", "y_centroid", "_value"])
+    if obs.empty:
+        return pd.Series(np.nan, index=gdf.index, dtype=float)
+
+    tree = KDTree(obs[["x_centroid", "y_centroid"]].values)
+    bnd_cx = gdf.geometry.centroid.x.values
+    bnd_cy = gdf.geometry.centroid.y.values
+    _, nn_idx = tree.query(np.column_stack([bnd_cx, bnd_cy]))
+    return pd.Series(obs["_value"].iloc[nn_idx].values, index=gdf.index, dtype=float)
+
+
 def plot_boundaries(
     xdata,
     kind: str = "cell",
     color_by: Optional[str] = None,
+    genes=None,
+    layer: Optional[str] = None,
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
+    colorbar_label: Optional[str] = None,
     palette: Optional[dict] = None,
     facecolor="none",
     edgecolor="white",
-    face_alpha: float = 0.3,
-    edge_alpha: float = 0.8,
+    face_alpha: float = 0.5,
+    edge_alpha: float = 0.2,
     linewidth: float = 0.5,
     bounds=None,
     ax=None,
@@ -66,31 +123,55 @@ def plot_boundaries(
     import matplotlib.pyplot as plt
     from matplotlib.collections import PatchCollection
     from matplotlib.patches import Polygon as MplPolygon
+    from matplotlib.cm import ScalarMappable
 
     owns_ax = ax is None
+    if genes is not None and color_by is not None:
+        raise ValueError("Use either genes=... for expression coloring or color_by=..., not both.")
 
     gdf = xdata.cell_boundaries if kind == "cell" else xdata.nucleus_boundaries
-    if gdf is None or len(gdf) == 0:
+    if gdf is None:
         raise ValueError(
             f"No {kind} boundaries loaded. "
             "Check that boundary parquet files or cells.zarr.zip were available on init."
         )
 
-    if bounds is None and getattr(xdata, "active_roi", None) is not None:
-        xmin, xmax, ymin, ymax = _roi_bounds_um(xdata.active_roi)
-    elif bounds is not None:
+    if bounds is not None:
         xmin, xmax, ymin, ymax = bounds
+    elif ax is not None and hasattr(gdf, "query_bounds"):
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        xmin, xmax = min(xlim), max(xlim)
+        ymin, ymax = min(ylim), max(ylim)
+    elif getattr(xdata, "active_roi", None) is not None:
+        xmin, xmax, ymin, ymax = _roi_bounds_um(xdata.active_roi)
     else:
         xmin = ymin = xmax = ymax = None
 
-    if xmin is not None:
+    if xmin is not None and hasattr(gdf, "query_ids"):
+        adata = getattr(xdata, "adata", None)
+        if (
+            adata is not None
+            and "x_centroid" in adata.obs.columns
+            and "y_centroid" in adata.obs.columns
+        ):
+            obs = adata.obs
+            candidate_ids = obs.index[
+                (obs["x_centroid"] >= xmin)
+                & (obs["x_centroid"] <= xmax)
+                & (obs["y_centroid"] >= ymin)
+                & (obs["y_centroid"] <= ymax)
+            ]
+            gdf = gdf.query_ids(candidate_ids)
+        else:
+            gdf = gdf.query_bounds((xmin, xmax, ymin, ymax))
+    elif xmin is not None and hasattr(gdf, "query_bounds"):
+        gdf = gdf.query_bounds((xmin, xmax, ymin, ymax))
+    elif xmin is not None:
         cx = gdf.geometry.centroid.x
         cy = gdf.geometry.centroid.y
         mask = (cx >= xmin) & (cx <= xmax) & (cy >= ymin) & (cy <= ymax)
         gdf = gdf[mask]
-
-    if max_cells is not None and len(gdf) > max_cells:
-        gdf = gdf.sample(max_cells, random_state=0)
 
     if len(gdf) == 0:
         if ax is None:
@@ -101,8 +182,37 @@ def plot_boundaries(
                 ax.set_axis_off()
         return ax
 
+    if max_cells is not None and len(gdf) > max_cells:
+        gdf = gdf.sample(max_cells, random_state=0)
+
     adata = getattr(xdata, "adata", None)
-    if color_by is not None and adata is not None and color_by in adata.obs.columns:
+    expression_label = None
+    expression_norm = None
+    expression_cmap = None
+    if genes is not None:
+        if adata is None:
+            raise ValueError("Expression coloring requires xdata.adata.")
+        expression_values, expression_label = _expression_series(adata, genes, layer=layer)
+        expr_col = expression_values.reindex(gdf.index)
+        if expr_col.isna().all():
+            expr_col = _nearest_obs_values(gdf, adata, expression_values)
+
+        finite = expr_col[np.isfinite(expr_col)]
+        if finite.empty:
+            face_rgba = [(0, 0, 0, 0)] * len(gdf)
+        else:
+            expression_cmap = plt.get_cmap(cmap)
+            if vmin is None:
+                vmin = float(finite.min())
+            if vmax is None:
+                vmax = float(finite.max())
+            if vmax == vmin:
+                vmax = vmin + 1e-12
+            expression_norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+            raw_colors = expression_cmap(expression_norm(expr_col.fillna(vmin).values))
+            raw_colors[:, 3] = np.where(expr_col.isna().values, 0.0, face_alpha)
+            face_rgba = [tuple(color) for color in raw_colors]
+    elif color_by is not None and adata is not None and color_by in adata.obs.columns:
         obs_col = adata.obs[color_by].reindex(gdf.index)
 
         if obs_col.isna().all():
@@ -241,5 +351,74 @@ def plot_boundaries(
         ]
         if handles:
             _place_legend(ax, handles)
+    elif show_colorbar and expression_norm is not None and expression_cmap is not None:
+        label = colorbar_label if colorbar_label is not None else expression_label
+        sm = ScalarMappable(norm=expression_norm, cmap=expression_cmap)
+        sm.set_array([])
+        cbar = ax.figure.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+        if label:
+            cbar.set_label(label)
 
     return ax
+
+
+def plot_cells(
+    xdata,
+    genes=None,
+    color_by: Optional[str] = None,
+    layer: Optional[str] = None,
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
+    colorbar_label: Optional[str] = None,
+    palette: Optional[dict] = None,
+    facecolor="none",
+    edgecolor="white",
+    face_alpha: float = 0.8,
+    edge_alpha: float = 0.2,
+    linewidth: float = 0.5,
+    bounds=None,
+    ax=None,
+    figsize: tuple = (8, 8),
+    max_cells: Optional[int] = None,
+    show_legend: bool = True,
+    legend_loc: str = "outside right",
+    legend_title: Optional[str] = None,
+    background: str = "black",
+    show_axis: bool = False,
+):
+    """
+    Plot cell boundary polygons, optionally filled by gene expression.
+
+    ``genes`` may be a single gene or a list of genes. Lists are summed per
+    cell before coloring. When ``genes`` is omitted, ``color_by`` can be used
+    to color cells by an ``adata.obs`` annotation.
+    """
+    return plot_boundaries(
+        xdata,
+        kind="cell",
+        genes=genes,
+        color_by=color_by,
+        layer=layer,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        show_colorbar=show_colorbar,
+        colorbar_label=colorbar_label,
+        palette=palette,
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        face_alpha=face_alpha,
+        edge_alpha=edge_alpha,
+        linewidth=linewidth,
+        bounds=bounds,
+        ax=ax,
+        figsize=figsize,
+        max_cells=max_cells,
+        show_legend=show_legend,
+        legend_loc=legend_loc,
+        legend_title=legend_title,
+        background=background,
+        show_axis=show_axis,
+    )

@@ -118,7 +118,7 @@ class XenData:
                  transcript_source: Literal['auto', 'zarr', 'parquet']='auto',
                  eager_transcript_threshold: int=20_000_000,
                  boundary_source: Literal['auto', 'parquet', 'zarr']='auto',
-                 lazy_boundaries: bool=False,
+                 lazy_boundaries: bool=True,
                  include_non_gene_features: bool=False):
         self.xenium_folder = xenium_folder
         self.cache_threshold = cache_threshold
@@ -248,8 +248,8 @@ class XenData:
         def _boundary_status(boundary_obj, kind):
             if boundary_obj is None:
                 return f"{kind}: unavailable"
-            if isinstance(boundary_obj, LazyBoundaryGeoDataFrame):
-                state = "loaded" if boundary_obj._data is not None else "lazy"
+            if hasattr(boundary_obj, "loaded"):
+                state = "loaded" if boundary_obj.loaded else "lazy"
                 return f"{kind}: available ({self._boundary_source}, {state})"
             try:
                 return f"{kind}: available ({self._boundary_source}, {len(boundary_obj):,})"
@@ -357,16 +357,16 @@ class XenData:
 
         cell_boundary_desc = "unavailable"
         if self.cell_boundaries is not None:
-            if isinstance(self.cell_boundaries, LazyBoundaryGeoDataFrame):
-                state = "loaded" if self.cell_boundaries._data is not None else "lazy"
+            if hasattr(self.cell_boundaries, "loaded"):
+                state = "loaded" if self.cell_boundaries.loaded else "lazy"
                 cell_boundary_desc = f"`cell_boundaries`: GeoDataFrame ({self._boundary_source}, {state})"
             else:
                 cell_boundary_desc = f"`cell_boundaries`: GeoDataFrame {self.cell_boundaries.shape}"
 
         nuc_boundary_desc = "unavailable"
         if self.nucleus_boundaries is not None:
-            if isinstance(self.nucleus_boundaries, LazyBoundaryGeoDataFrame):
-                state = "loaded" if self.nucleus_boundaries._data is not None else "lazy"
+            if hasattr(self.nucleus_boundaries, "loaded"):
+                state = "loaded" if self.nucleus_boundaries.loaded else "lazy"
                 nuc_boundary_desc = f"`nucleus_boundaries`: GeoDataFrame ({self._boundary_source}, {state})"
             else:
                 nuc_boundary_desc = f"`nucleus_boundaries`: GeoDataFrame {self.nucleus_boundaries.shape}"
@@ -556,26 +556,32 @@ class XenData:
         self.update_cell_names()
 
         if self.cell_boundaries is not None:
+            cell_boundaries = self.cell_boundaries
+            if hasattr(cell_boundaries, "query_bounds"):
+                cell_boundaries = cell_boundaries.query_bounds(_roi_bounds_um(roi_obj))
             # Prefer ID-based filtering; fall back to centroid-in-polygon when
             # ID systems differ (e.g. zarr integer IDs vs parquet hash IDs).
-            id_overlap = [n for n in self.cell_names if n in self.cell_boundaries.index]
+            id_overlap = [n for n in self.cell_names if n in cell_boundaries.index]
             if id_overlap:
-                self.cell_boundaries = self.cell_boundaries.loc[id_overlap]
+                self.cell_boundaries = cell_boundaries.loc[id_overlap]
             else:
-                cx = self.cell_boundaries.geometry.centroid.x
-                cy = self.cell_boundaries.geometry.centroid.y
+                cx = cell_boundaries.geometry.centroid.x
+                cy = cell_boundaries.geometry.centroid.y
                 in_roi = roi_obj.contains_points(cx.values, cy.values)
-                self.cell_boundaries = self.cell_boundaries[in_roi]
+                self.cell_boundaries = cell_boundaries[in_roi]
 
         if self.nucleus_boundaries is not None:
-            id_overlap = [n for n in self.cell_names if n in self.nucleus_boundaries.index]
+            nucleus_boundaries = self.nucleus_boundaries
+            if hasattr(nucleus_boundaries, "query_bounds"):
+                nucleus_boundaries = nucleus_boundaries.query_bounds(_roi_bounds_um(roi_obj))
+            id_overlap = [n for n in self.cell_names if n in nucleus_boundaries.index]
             if id_overlap:
-                self.nucleus_boundaries = self.nucleus_boundaries.loc[id_overlap]
+                self.nucleus_boundaries = nucleus_boundaries.loc[id_overlap]
             else:
-                cx = self.nucleus_boundaries.geometry.centroid.x
-                cy = self.nucleus_boundaries.geometry.centroid.y
+                cx = nucleus_boundaries.geometry.centroid.x
+                cy = nucleus_boundaries.geometry.centroid.y
                 in_roi = roi_obj.contains_points(cx.values, cy.values)
-                self.nucleus_boundaries = self.nucleus_boundaries[in_roi]
+                self.nucleus_boundaries = nucleus_boundaries[in_roi]
 
         if self.clusters is not None and len(self.clusters):
             keep_cells = [name for name in self.cell_names if name in self.clusters.index]
@@ -1034,11 +1040,18 @@ class XenData:
         self,
         kind: str = 'cell',
         color_by: Optional[str] = None,
+        genes=None,
+        layer: Optional[str] = None,
+        cmap: str = 'viridis',
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
+        show_colorbar: bool = True,
+        colorbar_label: Optional[str] = None,
         palette: Optional[dict] = None,
         facecolor='none',
         edgecolor='white',
         face_alpha: float = 0.3,
-        edge_alpha: float = 0.8,
+        edge_alpha: float = 0.2,
         linewidth: float = 0.5,
         bounds=None,
         ax=None,
@@ -1063,6 +1076,11 @@ class XenData:
         color_by : str or None
             Column name in ``adata.obs`` to use for per-cell fill colour (e.g.
             ``'Cluster'``). When None, all cells use ``facecolor``.
+        genes : str, sequence, or None
+            Gene or gene list to sum per cell and use as continuous fill colour.
+            Mutually exclusive with ``color_by``.
+        layer : str or None
+            AnnData layer to use for expression values. Defaults to ``adata.X``.
         palette : dict or None
             Mapping of category value → colour. Auto-generated when None.
         facecolor : colour spec
@@ -1072,7 +1090,7 @@ class XenData:
         face_alpha : float
             Opacity of the fill (0–1). Applied independently of edge. Default 0.3.
         edge_alpha : float
-            Opacity of the outline (0–1). Default 0.8.
+            Opacity of the outline (0–1). Default 0.2.
         linewidth : float
             Outline width in points. Default 0.5.
         bounds : tuple(xmin, xmax, ymin, ymax) or None
@@ -1110,6 +1128,73 @@ class XenData:
             self,
             kind=kind,
             color_by=color_by,
+            genes=genes,
+            layer=layer,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            show_colorbar=show_colorbar,
+            colorbar_label=colorbar_label,
+            palette=palette,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            face_alpha=face_alpha,
+            edge_alpha=edge_alpha,
+            linewidth=linewidth,
+            bounds=bounds,
+            ax=ax,
+            figsize=figsize,
+            max_cells=max_cells,
+            show_legend=show_legend,
+            legend_loc=legend_loc,
+            legend_title=legend_title,
+            background=background,
+            show_axis=show_axis,
+        )
+
+    def plot_cells(
+        self,
+        genes=None,
+        color_by: Optional[str] = None,
+        layer: Optional[str] = None,
+        cmap: str = 'viridis',
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
+        show_colorbar: bool = True,
+        colorbar_label: Optional[str] = None,
+        palette: Optional[dict] = None,
+        facecolor='none',
+        edgecolor='white',
+        face_alpha: float = 0.8,
+        edge_alpha: float = 0.2,
+        linewidth: float = 0.5,
+        bounds=None,
+        ax=None,
+        figsize: tuple = (8, 8),
+        max_cells: Optional[int] = None,
+        show_legend: bool = True,
+        legend_loc: str = 'outside right',
+        legend_title: Optional[str] = None,
+        background: str = 'black',
+        show_axis: bool = False,
+    ):
+        """
+        Plot cell boundary polygons.
+
+        When ``genes`` is supplied, cells are filled by expression of that gene
+        or by summed expression of the supplied gene list. When ``genes`` is
+        omitted, ``color_by`` can be used for categorical ``adata.obs`` labels.
+        """
+        return _pl_namespace.plot_cells(
+            self,
+            genes=genes,
+            color_by=color_by,
+            layer=layer,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            show_colorbar=show_colorbar,
+            colorbar_label=colorbar_label,
             palette=palette,
             facecolor=facecolor,
             edgecolor=edgecolor,
