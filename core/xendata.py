@@ -56,6 +56,7 @@ except ImportError:
 
 try:
     from ..analysis.binning import create_binned_adata as _create_binned_adata
+    from ..analysis.neighborhoods import neighborhood_composition as _neighborhood_composition
     from ..io.read.images import _image_extent_um
     from ..io.read.loader import load_xenium_folder
     from ..io.write.images import _pixel_aligned_bounds_um, write_ome_tiff as _write_ome_tiff_bundle
@@ -69,6 +70,10 @@ except ImportError:
     _binning_mod = _load_local_module(
         "_xentools_analysis_binning_for_xendata",
         os.path.join("..", "analysis", "binning.py"),
+    )
+    _neighborhoods_mod = _load_local_module(
+        "_xentools_analysis_neighborhoods_for_xendata",
+        os.path.join("..", "analysis", "neighborhoods.py"),
     )
     _images_read_mod = _load_local_module(
         "_xentools_io_read_images_for_xendata",
@@ -96,6 +101,7 @@ except ImportError:
     )
 
     _create_binned_adata = _binning_mod.create_binned_adata
+    _neighborhood_composition = _neighborhoods_mod.neighborhood_composition
     _image_extent_um = _images_read_mod._image_extent_um
     load_xenium_folder = _loader_read_mod.load_xenium_folder
     _pixel_aligned_bounds_um = _images_write_mod._pixel_aligned_bounds_um
@@ -115,6 +121,7 @@ __all__ = ["XenData"]
 class XenData:
     def __init__(self, xenium_folder, verbose=True, roi_file=None, crop_to_selection=None,
                  cache_threshold=5_000_000,
+                 cache_max_bytes: Optional[int]=512_000_000,
                  transcript_source: Literal['auto', 'zarr', 'parquet']='auto',
                  eager_transcript_threshold: int=20_000_000,
                  boundary_source: Literal['auto', 'parquet', 'zarr']='auto',
@@ -122,11 +129,13 @@ class XenData:
                  include_non_gene_features: bool=False):
         self.xenium_folder = xenium_folder
         self.cache_threshold = cache_threshold
+        self.cache_max_bytes = cache_max_bytes
         self.eager_transcript_threshold = int(eager_transcript_threshold)
         loaded = load_xenium_folder(
             xenium_folder,
             transcript_source=transcript_source,
             cache_threshold=cache_threshold,
+            cache_max_bytes=cache_max_bytes,
             eager_transcript_threshold=self.eager_transcript_threshold,
             boundary_source=boundary_source,
             lazy_boundaries=lazy_boundaries,
@@ -1240,6 +1249,28 @@ class XenData:
         rgb_combined[:, :, 2] = ass_counts  # Blue channel
         img = Image.fromarray(np.uint8(rgb_combined))
         return img
+
+    def neighborhood_composition(self, **kwargs):
+        """
+        Compute cell-neighborhood label composition for this object.
+
+        By default this uses ``self.active_roi`` when present. Pass
+        ``roi=None`` to compute over all cells, or ``roi=<name>`` to use a
+        named ROI from ``self.ROIs``.
+        """
+        return _neighborhood_composition(self, **kwargs)
+
+    def niche_heatmap(self, **kwargs):
+        """
+        Plot mean neighborhood-composition features by niche label.
+        """
+        return _pl_namespace.niche_heatmap(self, **kwargs)
+
+    def niche_map(self, **kwargs):
+        """
+        Plot cells spatially, colored by niche labels or niche-composition values.
+        """
+        return _pl_namespace.niche_map(self, **kwargs)
 
     def create_binned_adata(self, 
         bin_size=5,

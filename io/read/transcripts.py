@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import importlib.util
 import os
 import sys
-from typing import Literal
+from typing import Literal, Optional
 
 import pandas as pd
 
@@ -77,6 +77,7 @@ def load_xenium_transcripts(
     *,
     transcript_source: Literal["auto", "zarr", "parquet"] = "auto",
     cache_threshold: int = 5_000_000,
+    cache_max_bytes: Optional[int] = 512_000_000,
     eager_transcript_threshold: int = 20_000_000,
     verbose: bool = True,
 ) -> TranscriptLoadResult:
@@ -128,6 +129,7 @@ def load_xenium_transcripts(
                 zarr_path,
                 gene_names,
                 cache_threshold=cache_threshold,
+                cache_max_bytes=cache_max_bytes,
                 verbose=verbose,
             )
             if verbose:

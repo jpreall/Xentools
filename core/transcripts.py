@@ -6,10 +6,16 @@ import json
 import os
 import sys
 import importlib.util
+from collections import OrderedDict
 from typing import Literal
 
 import numpy as np
 import pandas as pd
+
+
+_TRANSCRIPT_COLUMNS = ["x_location", "y_location", "feature_name"]
+_TRANSCRIPT_COLUMNS_WITH_Z = ["x_location", "y_location", "z_location", "feature_name"]
+
 
 def _load_local_module(module_name, relative_path):
     """Load a sibling xentools module by file path when imported outside a package."""
@@ -159,6 +165,16 @@ def _normalize_feature_selection(features, available_features, arg_name="feature
     return selected
 
 
+def _empty_transcript_dataframe(include_z=False):
+    columns = _TRANSCRIPT_COLUMNS_WITH_Z if include_z else _TRANSCRIPT_COLUMNS
+    return pd.DataFrame(columns=columns)
+
+
+def _dataframe_nbytes(df):
+    """Estimate DataFrame memory usage including Python object columns."""
+    return int(df.memory_usage(index=True, deep=True).sum())
+
+
 class LazyTranscripts:
     """
     Memory-efficient lazy accessor for Xenium/Atera transcript data in transcripts.zarr.zip.
@@ -168,12 +184,21 @@ class LazyTranscripts:
     O(1) slice access rather than a full scan.
     """
 
-    def __init__(self, zarr_path, gene_names, cache_threshold=5_000_000, verbose=True):
+    def __init__(
+        self,
+        zarr_path,
+        gene_names,
+        cache_threshold=5_000_000,
+        cache_max_bytes=512_000_000,
+        verbose=True,
+    ):
         self._path = str(zarr_path)
         self._gene_names = list(gene_names)
         self._gene_index = {g: i for i, g in enumerate(gene_names)}
         self.cache_threshold = cache_threshold
-        self._query_cache = {}
+        self.cache_max_bytes = None if cache_max_bytes is None else int(cache_max_bytes)
+        self._query_cache = OrderedDict()
+        self._query_cache_bytes = 0
         self._tile_meta = {}
         self._tile_size = (500.0, 500.0)
         self._tile_index_mode = "unknown"
@@ -371,62 +396,271 @@ class LazyTranscripts:
             if m["x"] is not None and x0 <= m["x"] <= x1 and y0 <= m["y"] <= y1
         ]
 
-    def query(self, xmin=None, xmax=None, ymin=None, ymax=None, genes=None, quality: str = "high") -> pd.DataFrame:
-        """
-        Return a DataFrame of transcripts within a bounding box.
-        """
-        import zarr
+    def _normalize_query_bounds(self, xmin=None, xmax=None, ymin=None, ymax=None):
+        return (
+            -np.inf if xmin is None else float(xmin),
+            np.inf if xmax is None else float(xmax),
+            -np.inf if ymin is None else float(ymin),
+            np.inf if ymax is None else float(ymax),
+        )
 
-        xmin = -np.inf if xmin is None else float(xmin)
-        xmax = np.inf if xmax is None else float(xmax)
-        ymin = -np.inf if ymin is None else float(ymin)
-        ymax = np.inf if ymax is None else float(ymax)
-
+    def _normalize_gene_ids(self, genes=None):
         if genes is None:
-            gene_ids = None
-        else:
-            if isinstance(genes, str):
-                genes = [genes]
-            gene_ids = [self._gene_index[g] for g in genes if g in self._gene_index]
-            if not gene_ids:
-                return pd.DataFrame(columns=["x_location", "y_location", "feature_name"])
+            return None
+        if isinstance(genes, str):
+            genes = [genes]
+        gene_ids = []
+        seen = set()
+        for gene in genes:
+            if gene not in self._gene_index:
+                continue
+            gid = self._gene_index[gene]
+            if gid in seen:
+                continue
+            seen.add(gid)
+            gene_ids.append(gid)
+        return gene_ids
 
-        cache_key = (
+    def _quality_slices(self, quality):
+        if quality == "high":
+            return [(2, 3)]
+        if quality == "low":
+            return [(0, 1)]
+        return [(0, 1), (2, 3)]
+
+    def _query_cache_key(self, xmin, xmax, ymin, ymax, gene_ids, quality, include_z=False):
+        return (
             round(xmin, 1),
             round(xmax, 1),
             round(ymin, 1),
             round(ymax, 1),
             tuple(sorted(gene_ids)) if gene_ids is not None else None,
             quality,
+            bool(include_z),
         )
+
+    def _get_cached_query(self, cache_key):
+        if cache_key not in self._query_cache:
+            return None
+        cached = self._query_cache.pop(cache_key)
+        self._query_cache[cache_key] = cached
+        return cached["data"]
+
+    def _cache_query_result(self, cache_key, result):
+        if len(result) >= self.cache_threshold:
+            return
+
+        nbytes = _dataframe_nbytes(result)
+        if self.cache_max_bytes is not None and nbytes > self.cache_max_bytes:
+            return
+
         if cache_key in self._query_cache:
-            return self._query_cache[cache_key]
+            cached = self._query_cache.pop(cache_key)
+            self._query_cache_bytes -= cached["nbytes"]
+
+        while (
+            self.cache_max_bytes is not None
+            and self._query_cache
+            and self._query_cache_bytes + nbytes > self.cache_max_bytes
+        ):
+            _old_key, old = self._query_cache.popitem(last=False)
+            self._query_cache_bytes -= old["nbytes"]
+
+        self._query_cache[cache_key] = {"data": result, "nbytes": nbytes}
+        self._query_cache_bytes += nbytes
+
+    def _tile_candidate_count(self, grp, tile_key, gene_ids, quality):
+        """
+        Return transcripts read from a tile before precise coordinate masking.
+
+        For gene-filtered queries this uses ``gene_offset`` to count only the
+        requested gene/quality slices. For all-gene queries, this reports the
+        tile object count from metadata because the current all-gene query path
+        reads the tile coordinate array as a whole.
+        """
+        if gene_ids is None:
+            return int(self._tile_meta.get(tile_key, {}).get("n", 0))
+
+        try:
+            offsets = grp[f"grids/0/{tile_key}/gene_offset"][:]
+        except Exception:
+            return 0
+
+        n = 0
+        for gid in gene_ids:
+            if gid >= len(offsets):
+                continue
+            for sc, ec in self._quality_slices(quality):
+                s, e = int(offsets[gid, sc]), int(offsets[gid, ec])
+                if e > s:
+                    n += e - s
+        return n
+
+    def iter_tiles(
+        self,
+        xmin=None,
+        xmax=None,
+        ymin=None,
+        ymax=None,
+        genes=None,
+        quality: str = "high",
+        include_z: bool = False,
+        include_empty: bool = False,
+    ):
+        """
+        Yield ``(tile_key, DataFrame)`` pairs for transcripts matching a query.
+
+        This is the streaming primitive for out-of-core reductions. Unlike
+        :meth:`query`, it does not concatenate all matching tile results into a
+        single DataFrame and it does not populate the query cache.
+
+        Parameters mirror :meth:`query`. Set ``include_z=True`` to include the
+        z coordinate stored as the third column of each tile's location array.
+        Empty tile results are skipped by default; set ``include_empty=True`` to
+        yield an empty DataFrame for each candidate tile.
+        """
+        import zarr
+
+        xmin, xmax, ymin, ymax = self._normalize_query_bounds(xmin, xmax, ymin, ymax)
+        gene_ids = self._normalize_gene_ids(genes)
+        if genes is not None and not gene_ids:
+            return
 
         tile_keys = self._candidate_tiles(xmin, xmax, ymin, ymax)
 
         store = zarr.storage.ZipStore(self._path, mode="r")
-        frames = []
         try:
             grp = _open_zarr_group_compat(zarr, store, mode="r", force_v2=True)
             for key in tile_keys:
-                df = self._load_tile(grp, key, xmin, xmax, ymin, ymax, gene_ids, quality)
+                df = self._load_tile(grp, key, xmin, xmax, ymin, ymax, gene_ids, quality, include_z=include_z)
                 if df is not None and len(df):
-                    frames.append(df)
+                    yield key, df
+                elif include_empty:
+                    yield key, _empty_transcript_dataframe(include_z=include_z)
         finally:
             store.close()
+
+    def diagnose_query(self, xmin=None, xmax=None, ymin=None, ymax=None, genes=None, quality: str = "high"):
+        """
+        Return a dictionary describing how much work a lazy transcript query does.
+
+        The diagnostic reports candidate tile count, candidate transcript count
+        before precise coordinate masking, returned transcript count, and the
+        survival fraction after coordinate masking. It is intended for measuring
+        tile-pruning efficiency on real datasets and ROI sizes.
+        """
+        import zarr
+
+        xmin, xmax, ymin, ymax = self._normalize_query_bounds(xmin, xmax, ymin, ymax)
+        gene_ids = self._normalize_gene_ids(genes)
+        if genes is not None and not gene_ids:
+            return {
+                "bounds": (xmin, xmax, ymin, ymax),
+                "quality": quality,
+                "requested_genes": list(genes) if not isinstance(genes, str) else [genes],
+                "matched_genes": 0,
+                "tile_index_mode": self._tile_index_mode,
+                "tile_size": self._tile_size,
+                "candidate_tiles": 0,
+                "candidate_transcripts": 0,
+                "returned_transcripts": 0,
+                "survival_fraction": 0.0,
+            }
+
+        tile_keys = self._candidate_tiles(xmin, xmax, ymin, ymax)
+        candidate_transcripts = 0
+        returned_transcripts = 0
+
+        store = zarr.storage.ZipStore(self._path, mode="r")
+        try:
+            grp = _open_zarr_group_compat(zarr, store, mode="r", force_v2=True)
+            for key in tile_keys:
+                candidate_transcripts += self._tile_candidate_count(grp, key, gene_ids, quality)
+                df = self._load_tile(grp, key, xmin, xmax, ymin, ymax, gene_ids, quality)
+                if df is not None:
+                    returned_transcripts += len(df)
+        finally:
+            store.close()
+
+        if genes is None:
+            requested_genes = None
+        elif isinstance(genes, str):
+            requested_genes = [genes]
+        else:
+            requested_genes = list(genes)
+
+        survival_fraction = (
+            returned_transcripts / candidate_transcripts
+            if candidate_transcripts
+            else 0.0
+        )
+        return {
+            "bounds": (xmin, xmax, ymin, ymax),
+            "quality": quality,
+            "requested_genes": requested_genes,
+            "matched_genes": len(gene_ids) if gene_ids is not None else None,
+            "tile_index_mode": self._tile_index_mode,
+            "tile_size": self._tile_size,
+            "candidate_tiles": len(tile_keys),
+            "candidate_transcripts": int(candidate_transcripts),
+            "returned_transcripts": int(returned_transcripts),
+            "survival_fraction": float(survival_fraction),
+        }
+
+    def query(
+        self,
+        xmin=None,
+        xmax=None,
+        ymin=None,
+        ymax=None,
+        genes=None,
+        quality: str = "high",
+        include_z: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Return a DataFrame of transcripts within a bounding box.
+
+        Parameters
+        ----------
+        include_z
+            If ``True``, include ``z_location`` from the transcript zarr
+            ``location`` array. The default is ``False`` to keep common
+            plotting queries and cached DataFrames smaller.
+        """
+        xmin, xmax, ymin, ymax = self._normalize_query_bounds(xmin, xmax, ymin, ymax)
+        gene_ids = self._normalize_gene_ids(genes)
+        if genes is not None and not gene_ids:
+            return _empty_transcript_dataframe(include_z=include_z)
+
+        cache_key = self._query_cache_key(xmin, xmax, ymin, ymax, gene_ids, quality, include_z=include_z)
+        cached = self._get_cached_query(cache_key)
+        if cached is not None:
+            return cached
+
+        frames = [
+            df
+            for _tile_key, df in self.iter_tiles(
+                xmin=xmin,
+                xmax=xmax,
+                ymin=ymin,
+                ymax=ymax,
+                genes=genes,
+                quality=quality,
+                include_z=include_z,
+            )
+        ]
 
         result = (
             pd.concat(frames, ignore_index=True)
             if frames
-            else pd.DataFrame(columns=["x_location", "y_location", "feature_name"])
+            else _empty_transcript_dataframe(include_z=include_z)
         )
 
-        if len(result) < self.cache_threshold:
-            self._query_cache[cache_key] = result
+        self._cache_query_result(cache_key, result)
 
         return result
 
-    def _load_tile(self, grp, tile_key, xmin, xmax, ymin, ymax, gene_ids, quality):
+    def _load_tile(self, grp, tile_key, xmin, xmax, ymin, ymax, gene_ids, quality, include_z=False):
         prefix = f"grids/0/{tile_key}"
         try:
             loc_arr = grp[f"{prefix}/location"]
@@ -435,12 +669,7 @@ class LazyTranscripts:
         except Exception:
             return None
 
-        if quality == "high":
-            q_slices = [(2, 3)]
-        elif quality == "low":
-            q_slices = [(0, 1)]
-        else:
-            q_slices = [(0, 1), (2, 3)]
+        q_slices = self._quality_slices(quality)
 
         if gene_ids is not None:
             offsets = off_arr[:]
@@ -464,7 +693,7 @@ class LazyTranscripts:
                 else:
                     merged.append([s, e])
 
-            xs, ys, gs = [], [], []
+            xs, ys, zs, gs = [], [], [], []
             for s, e in merged:
                 locs = loc_arr[s:e]
                 gids = gid_arr[s:e, 0]
@@ -478,12 +707,15 @@ class LazyTranscripts:
                     continue
                 xs.append(locs[mask, 0])
                 ys.append(locs[mask, 1])
+                if include_z:
+                    zs.append(locs[mask, 2])
                 gs.append(gids[mask])
 
             if not xs:
                 return None
             x = np.concatenate(xs)
             y = np.concatenate(ys)
+            z = np.concatenate(zs) if include_z else None
             g_idx = np.concatenate(gs)
         else:
             locs = loc_arr[:]
@@ -497,15 +729,44 @@ class LazyTranscripts:
                 return None
             x = locs[mask, 0]
             y = locs[mask, 1]
+            z = locs[mask, 2] if include_z else None
             g_idx = gid_arr[:, 0][mask]
 
         n = len(self._gene_names)
         names = np.array([self._gene_names[i] if i < n else "Unknown" for i in g_idx], dtype=object)
+        if include_z:
+            return pd.DataFrame({"x_location": x, "y_location": y, "z_location": z, "feature_name": names})
         return pd.DataFrame({"x_location": x, "y_location": y, "feature_name": names})
 
     @property
     def n_transcripts(self):
         return sum(m["n"] for m in self._tile_meta.values())
+
+    @property
+    def columns(self):
+        """Columns returned by lazy transcript queries."""
+        return pd.Index(_TRANSCRIPT_COLUMNS)
+
+    @property
+    def gene_names(self):
+        """Ordered gene/feature names available for transcript queries."""
+        return pd.Index(self._gene_names)
+
+    @property
+    def n_genes(self):
+        """Number of gene/feature names available in the transcript zarr."""
+        return len(self._gene_names)
+
+    @property
+    def shape(self):
+        """
+        DataFrame-like shape of the lazy transcript table.
+
+        Only the lightweight transcript columns exposed by lazy queries are
+        represented here; richer per-transcript metadata may require reading
+        ``transcripts.parquet`` when available.
+        """
+        return (self.n_transcripts, len(_TRANSCRIPT_COLUMNS))
 
     def __len__(self):
         return self.n_transcripts
@@ -579,15 +840,49 @@ class LazyTranscripts:
 
     def clear_cache(self):
         self._query_cache.clear()
+        self._query_cache_bytes = 0
+
+    def cache_info(self):
+        """
+        Return current query-cache accounting.
+
+        ``bytes`` is estimated from cached DataFrame memory usage, including
+        object columns. ``max_bytes=None`` means no byte-level cap is enforced.
+        """
+        return {
+            "entries": len(self._query_cache),
+            "bytes": int(self._query_cache_bytes),
+            "max_bytes": self.cache_max_bytes,
+            "cache_threshold": self.cache_threshold,
+        }
 
     def __repr__(self):
         n = self.n_transcripts
         t = len(self._tile_meta)
-        g = len(self._gene_names)
-        cached = len(self._query_cache)
+        g = self.n_genes
+        cache = self.cache_info()
+        frame = self.frame
+        x0, x1 = frame[0]
+        y0, y1 = frame[1]
+        preview = ", ".join(map(str, self._gene_names[:6]))
+        if g > 6:
+            preview += ", ..."
+        cache_limit = "unlimited" if cache["max_bytes"] is None else f"{cache['max_bytes']:,} bytes"
         return (
-            f"LazyTranscripts({n:,} transcripts | {t} tiles | "
-            f"{g:,} genes | tile_index={self._tile_index_mode} | "
-            f"cache_threshold={self.cache_threshold:,} | "
-            f"{cached} cached queries)"
+            "LazyTranscripts\n"
+            f"  source: {os.path.basename(self._path)}\n"
+            f"  shape: ({n:,}, {len(_TRANSCRIPT_COLUMNS)})  "
+            f"[{', '.join(_TRANSCRIPT_COLUMNS)}]\n"
+            f"  genes/features: {g:,}"
+            + (f"  ({preview})" if preview else "")
+            + "\n"
+            f"  spatial extent: x={x0:,.1f}-{x1:,.1f} um, "
+            f"y={y0:,.1f}-{y1:,.1f} um\n"
+            f"  tile index: {self._tile_index_mode} ({t:,} tiles; "
+            f"tile_size={self._tile_size[0]:g} x {self._tile_size[1]:g} um)\n"
+            f"  cache: {cache['entries']} entries, {cache['bytes']:,} bytes "
+            f"(limit={cache_limit}; row_threshold={self.cache_threshold:,})\n"
+            "  optional columns: z_location via include_z=True\n"
+            "  query with: .query(xmin=..., xmax=..., ymin=..., ymax=..., "
+            "genes=[...], quality='high'|'low'|'all', include_z=False)"
         )

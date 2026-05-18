@@ -97,6 +97,16 @@ Color cells by summed expression of a gene list:
 
    ax = xdata.plot_cells(genes=["EPCAM", "KRT19"], cmap="magma")
 
+Niche Plots
+-----------
+
+After computing niches with ``xentools.build_niches()``, visualize them with:
+
+.. code-block:: python
+
+   ax = xdata.niche_heatmap(key_added="niche")
+   ax = xdata.niche_map(key_added="niche")
+
 Layering
 --------
 

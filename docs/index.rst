@@ -24,6 +24,7 @@ Contents
    installation
    quickstart
    concepts
+   analysis
    plotting
    lazy_transcripts
    api

@@ -3,6 +3,7 @@
 from .annotations import import_cell_annotations
 from .binning import _bin_transcript_dataframe, create_binned_adata
 from .graph import _apply_weights, build_spatial_graph
+from .neighborhoods import neighborhood_composition
 from .niches import build_niches, evaluate_niche_k_values
 from .normalization import normalize_tp10k
 
@@ -14,5 +15,6 @@ __all__ = [
     "create_binned_adata",
     "evaluate_niche_k_values",
     "import_cell_annotations",
+    "neighborhood_composition",
     "normalize_tp10k",
 ]

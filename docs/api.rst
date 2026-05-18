@@ -20,6 +20,7 @@ Top-Level API
    xentools.plot_cells
    xentools.build_niches
    xentools.evaluate_niche_k_values
+   xentools.neighborhood_composition
    xentools.normalize_tp10k
 
 XenData
@@ -47,6 +48,7 @@ Analysis Namespace
 
    xentools.analysis.build_niches
    xentools.analysis.evaluate_niche_k_values
+   xentools.analysis.neighborhood_composition
    xentools.analysis.build_spatial_graph
    xentools.analysis.normalize_tp10k
    xentools.analysis.create_binned_adata
@@ -59,4 +61,9 @@ Core Objects
    xentools.ROI
    xentools.ROICollection
    xentools.LazyTranscripts
+   xentools.LazyTranscripts.query
+   xentools.LazyTranscripts.iter_tiles
+   xentools.LazyTranscripts.diagnose_query
+   xentools.LazyTranscripts.cache_info
+   xentools.LazyTranscripts.clear_cache
    xentools.LazyBoundaryGeoDataFrame

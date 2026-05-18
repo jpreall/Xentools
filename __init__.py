@@ -1,5 +1,6 @@
 import sys
 
+from . import analysis
 from . import io
 from . import pl
 from . import utils
@@ -13,6 +14,8 @@ from .pl import (
     create_binned_image,
     create_bins,
     create_multilayer_image,
+    niche_heatmap,
+    niche_map,
     plot_boundaries,
     plot_cells,
     plot_binned_greyscale,
@@ -31,6 +34,7 @@ from .xentools import (
     ROICollection,
     ROI_to_pixels,
     import_cell_annotations,
+    neighborhood_composition,
     read_xen_panel,
     read_xenium_to_anndata,
     frame,
@@ -45,6 +49,7 @@ from .xentools import (
 
 __all__ = [
     'io', 
+    'analysis',
     'pl',
     'utils',
     'write_xenium_gene_groups',
@@ -56,6 +61,7 @@ __all__ = [
     'ROICollection',
     'ROI_to_pixels',
     'import_cell_annotations',
+    'neighborhood_composition',
     'read_xen_panel', 
     'read_xenium_to_anndata',
     'frame',
@@ -64,6 +70,8 @@ __all__ = [
     'bin_expression', 
     'create_binned_image',
     'create_multilayer_image',
+    'niche_heatmap',
+    'niche_map',
     'rasterize',
     'rasterize_rgb',
     'plot_binned_rgb',
@@ -79,4 +87,4 @@ __all__ = [
     'evaluate_niche_k_values',
     'normalize_tp10k',
     ]
-sys.modules.update({f"{__name__}.{m}": globals()[m] for m in ["io", "pl", "utils"]})
+sys.modules.update({f"{__name__}.{m}": globals()[m] for m in ["analysis", "io", "pl", "utils"]})

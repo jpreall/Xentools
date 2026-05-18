@@ -231,14 +231,36 @@ def plot_boundaries(
             )
 
         categories = (
-            list(obs_col.cat.categories)
-            if hasattr(obs_col, "cat")
-            else sorted(obs_col.dropna().unique())
+            None
+            if pd.api.types.is_numeric_dtype(obs_col)
+            else (
+                list(obs_col.cat.categories)
+                if hasattr(obs_col, "cat")
+                else sorted(obs_col.dropna().unique())
+            )
         )
-        if palette is None:
-            palette = dict(zip(categories, _generate_palette(len(categories))))
-        raw_colors = obs_col.astype(object).map(palette).fillna("gray").tolist()
-        face_rgba = [(*mcolors.to_rgb(c), face_alpha) for c in raw_colors]
+        if categories is None:
+            expression_label = color_by
+            finite = obs_col[np.isfinite(obs_col)]
+            if finite.empty:
+                face_rgba = [(0, 0, 0, 0)] * len(gdf)
+            else:
+                expression_cmap = plt.get_cmap(cmap)
+                if vmin is None:
+                    vmin = float(finite.min())
+                if vmax is None:
+                    vmax = float(finite.max())
+                if vmax == vmin:
+                    vmax = vmin + 1e-12
+                expression_norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+                raw_colors = expression_cmap(expression_norm(obs_col.fillna(vmin).values))
+                raw_colors[:, 3] = np.where(obs_col.isna().values, 0.0, face_alpha)
+                face_rgba = [tuple(color) for color in raw_colors]
+        else:
+            if palette is None:
+                palette = dict(zip(categories, _generate_palette(len(categories))))
+            raw_colors = obs_col.astype(object).map(palette).fillna("gray").tolist()
+            face_rgba = [(*mcolors.to_rgb(c), face_alpha) for c in raw_colors]
     else:
         if facecolor == "none":
             face_rgba = [(0, 0, 0, 0)] * len(gdf)

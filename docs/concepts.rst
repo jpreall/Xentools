@@ -51,6 +51,25 @@ xentools can choose between eager parquet loading and lazy zarr loading. The
 default behavior is to eagerly load reasonably sized parquet transcript tables
 and use lazy zarr access for very large datasets.
 
+This is a deliberate tradeoff. Parquet is the richer representation for
+per-transcript metadata and arbitrary column filtering. The zarr-backed
+``LazyTranscripts`` path is faster for localized spatial/gene queries because
+it uses the native tile grid and ``gene_offset`` arrays rather than scanning a
+row-partitioned table.
+
+Xentools and SpatialData
+------------------------
+
+xentools and SpatialData solve overlapping but different problems.
+
+Use xentools when the priority is to open a fresh Xenium/Atera output directory
+directly, inspect ROIs quickly, and make transcript/image/boundary plots without
+first creating another large on-disk object.
+
+Use SpatialData when the priority is ecosystem interoperability, explicit
+coordinate transforms across many modalities, napari/scverse workflows, or
+larger analysis pipelines that benefit from Dask-backed composability.
+
 Boundary Source Selection
 -------------------------
 

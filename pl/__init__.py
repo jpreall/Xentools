@@ -10,6 +10,7 @@ Import plotting functions here so users can access them as:
 from .boundaries import plot_boundaries, plot_cells
 from .colors import generate_palette, plot_palette
 from .images import show_ome_tiff
+from .niches import niche_heatmap, niche_map
 from .transcripts import (
     bin_expression,
     create_binned_image,
@@ -28,6 +29,8 @@ __all__ = [
     "create_bins",
     "create_multilayer_image",
     "generate_palette",
+    "niche_heatmap",
+    "niche_map",
     "plot_binned_greyscale",
     "plot_binned_rgb",
     "plot_boundaries",

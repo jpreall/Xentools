@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import importlib.util
 import os
 import sys
-from typing import Literal
+from typing import Literal, Optional
 
 
 def _load_local_module(module_name, relative_path):
@@ -71,6 +71,7 @@ def load_xenium_folder(
     *,
     transcript_source: Literal["auto", "zarr", "parquet"] = "auto",
     cache_threshold: int = 5_000_000,
+    cache_max_bytes: Optional[int] = 512_000_000,
     eager_transcript_threshold: int = 20_000_000,
     boundary_source: Literal["auto", "parquet", "zarr"] = "auto",
     lazy_boundaries: bool = True,
@@ -84,6 +85,7 @@ def load_xenium_folder(
         xenium_folder,
         transcript_source=transcript_source,
         cache_threshold=cache_threshold,
+        cache_max_bytes=cache_max_bytes,
         eager_transcript_threshold=eager_transcript_threshold,
         verbose=verbose,
     )

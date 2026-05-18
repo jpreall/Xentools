@@ -12,9 +12,12 @@ def test_top_level_module_has_explicit_public_api():
         "read_xen_panel",
         "ROI_to_pixels",
         "import_cell_annotations",
+        "neighborhood_composition",
         "splat",
         "show_ome_tiff",
         "plot_cells",
+        "niche_heatmap",
+        "niche_map",
         "plot_binned_rgb",
         "build_niches",
         "evaluate_niche_k_values",
@@ -52,6 +55,8 @@ def test_plotting_reexports_point_to_pl_namespace():
     assert xentools.splat is xentools.pl.splat
     assert xentools.show_ome_tiff is xentools.pl.show_ome_tiff
     assert xentools.plot_cells is xentools.pl.plot_cells
+    assert xentools.niche_heatmap is xentools.pl.niche_heatmap
+    assert xentools.niche_map is xentools.pl.niche_map
     assert xentools.plot_binned_rgb is xentools.pl.plot_binned_rgb
     assert xentools.rasterize is xentools.pl.rasterize
 
@@ -82,6 +87,8 @@ def test_low_level_helpers_live_in_namespaces():
     assert xentools.um_to_pixels is xentools.utils.um_to_pixels
     assert xentools.ROI_to_pixels is xentools.utils.ROI_to_pixels
     assert callable(xentools.import_cell_annotations)
+    assert callable(xentools.neighborhood_composition)
+    assert xentools.neighborhood_composition is xentools.analysis.neighborhood_composition
 
 
 def test_xendata_is_exported_from_core_module():

@@ -54,6 +54,7 @@ def _is_lazy_transcripts(obj) -> bool:
 try:
     from .analysis.annotations import import_cell_annotations
     from .analysis.graph import build_spatial_graph
+    from .analysis.neighborhoods import neighborhood_composition
     from .analysis.niches import build_niches, evaluate_niche_k_values
     from .analysis.normalization import normalize_tp10k
 except ImportError:
@@ -69,12 +70,17 @@ except ImportError:
         "_xentools_analysis_niches",
         os.path.join("analysis", "niches.py"),
     )
+    _neighborhoods_mod = _load_local_module(
+        "_xentools_analysis_neighborhoods",
+        os.path.join("analysis", "neighborhoods.py"),
+    )
     _normalization_mod = _load_local_module(
         "_xentools_analysis_normalization",
         os.path.join("analysis", "normalization.py"),
     )
     import_cell_annotations = _annotations_mod.import_cell_annotations
     build_spatial_graph = _graph_mod.build_spatial_graph
+    neighborhood_composition = _neighborhoods_mod.neighborhood_composition
     build_niches = _niches_mod.build_niches
     evaluate_niche_k_values = _niches_mod.evaluate_niche_k_values
     normalize_tp10k = _normalization_mod.normalize_tp10k
@@ -111,6 +117,11 @@ except ImportError:
 
 
 try:
+    from . import analysis as _analysis_namespace
+except ImportError:
+    _analysis_namespace = _load_local_module("_xentools_analysis", os.path.join("analysis", "__init__.py"))
+
+try:
     from . import pl as _pl_namespace
 except ImportError:
     _pl_namespace = _load_local_module("_xentools_pl", os.path.join("pl", "__init__.py"))
@@ -135,9 +146,12 @@ create_multilayer_image = _pl_namespace.create_multilayer_image
 plot_binned_greyscale = _pl_namespace.plot_binned_greyscale
 plot_boundaries = _pl_namespace.plot_boundaries
 plot_cells = _pl_namespace.plot_cells
+niche_heatmap = _pl_namespace.niche_heatmap
+niche_map = _pl_namespace.niche_map
 show_ome_tiff = _pl_namespace.show_ome_tiff
 splat = _pl_namespace.splat
 pl = _pl_namespace
+analysis = _analysis_namespace
 io = _io_namespace
 utils = _utils_namespace
 _make_gene_panel_df = _io_namespace.read._make_gene_panel_df
@@ -149,6 +163,7 @@ um_to_pixels = _utils_namespace.um_to_pixels
 
 __all__ = [
     "io",
+    "analysis",
     "XenData",
     "LazyTranscripts",
     "LazyBoundaryGeoDataFrame",
@@ -164,6 +179,7 @@ __all__ = [
     "read_ROI_from_csv",
     "read_ROI_from_geojson",
     "build_spatial_graph",
+    "neighborhood_composition",
     "build_niches",
     "evaluate_niche_k_values",
     "normalize_tp10k",
@@ -177,6 +193,8 @@ __all__ = [
     "plot_binned_greyscale",
     "plot_boundaries",
     "plot_cells",
+    "niche_heatmap",
+    "niche_map",
     "show_ome_tiff",
     "splat",
     "pl",
