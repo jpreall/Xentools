@@ -23,6 +23,38 @@ except ImportError:
 __all__ = ["show_ome_tiff"]
 
 
+def _roi_bounds_um(roi_geometry):
+    minx, miny, maxx, maxy = roi_geometry.bounds
+    return float(minx), float(maxx), float(miny), float(maxy)
+
+
+def _roi_bounds_in_pixels_unclipped(roi_geometry, pixel_size):
+    xmin, xmax, ymin, ymax = _roi_bounds_um(roi_geometry)
+    return (
+        int(np.floor(xmin / pixel_size)),
+        int(np.ceil(xmax / pixel_size)),
+        int(np.floor(ymin / pixel_size)),
+        int(np.ceil(ymax / pixel_size)),
+    )
+
+
+def _pad_to_requested_level_bounds(img, requested_bounds, actual_bounds):
+    req_x0, req_x1, req_y0, req_y1 = requested_bounds
+    act_x0, act_x1, act_y0, act_y1 = actual_bounds
+    pad_left = max(0, act_x0 - req_x0)
+    pad_right = max(0, req_x1 - act_x1)
+    pad_top = max(0, act_y0 - req_y0)
+    pad_bottom = max(0, req_y1 - act_y1)
+    if not any((pad_left, pad_right, pad_top, pad_bottom)):
+        return img
+    return np.pad(
+        img,
+        ((pad_top, pad_bottom), (pad_left, pad_right)),
+        mode="constant",
+        constant_values=0,
+    )
+
+
 def show_ome_tiff(
     image_path,
     figsize: Optional[tuple] = None,
@@ -76,12 +108,16 @@ def show_ome_tiff(
             full_shape = level_arrays[0].shape
 
             if roi is not None:
+                requested_extent = _roi_bounds_um(roi)
+                requested_base_bounds = _roi_bounds_in_pixels_unclipped(roi, pixel_size)
                 base_bounds = _roi_bounds_in_pixels(roi, pixel_size, full_shape)
                 source_px = max(
-                    base_bounds[1] - base_bounds[0],
-                    base_bounds[3] - base_bounds[2],
+                    requested_base_bounds[1] - requested_base_bounds[0],
+                    requested_base_bounds[3] - requested_base_bounds[2],
                 )
             else:
+                requested_extent = None
+                requested_base_bounds = None
                 base_bounds = None
                 source_px = max(full_shape[-2:])
 
@@ -104,6 +140,7 @@ def show_ome_tiff(
                 )
 
             if base_bounds is not None:
+                requested_level_bounds = _scale_bounds_for_level(requested_base_bounds, best_level)
                 lx0, lx1, ly0, ly1 = _scale_bounds_for_level(base_bounds, best_level)
                 ly0 = max(0, ly0)
                 ly1 = min(level_shape[-2], ly1)
@@ -124,6 +161,11 @@ def show_ome_tiff(
                         img = np.asarray(arr[:, ly0:ly1, lx0:lx1]).max(axis=0)
                     else:
                         img = np.asarray(arr[z_index, ly0:ly1, lx0:lx1])
+                img = _pad_to_requested_level_bounds(
+                    img,
+                    requested_level_bounds,
+                    (lx0, lx1, ly0, ly1),
+                )
             else:
                 if use_zarr_levels:
                     if level_array.ndim == 2:
@@ -155,11 +197,12 @@ def show_ome_tiff(
 
     if micron_coords:
         if base_bounds is not None:
+            xmin, xmax, ymin, ymax = requested_extent
             im_extent = [
-                base_bounds[0] * pixel_size,
-                base_bounds[1] * pixel_size,
-                base_bounds[2] * pixel_size,
-                base_bounds[3] * pixel_size,
+                xmin,
+                xmax,
+                ymin,
+                ymax,
             ]
         else:
             im_extent = [0.0, full_shape[-1] * pixel_size, 0.0, full_shape[-2] * pixel_size]

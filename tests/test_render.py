@@ -64,6 +64,25 @@ def test_render_background_image_alpha_dims_scalar_image(xdata):
     assert dim_vmax > full_vmax
 
 
+def test_render_out_of_image_bounds_keeps_layer_extents_aligned(xdata):
+    genes = _genes(xdata)
+    bounds = (-1000.0, 2000.0, -600.0, 2400.0)
+
+    ax = xdata.render(
+        image={"channel": "DAPI", "level": 2, "alpha": 0.3},
+        splat={"genes": genes, "pixel_size_um": 10, "sigma_um": 1, "gains": [2, 2, 2]},
+        cells={"edge_alpha": 0.1},
+        bounds=bounds,
+    )
+
+    image_extent = tuple(float(v) for v in ax.images[0].get_extent())
+    splat_extent = tuple(float(v) for v in ax.images[-1].get_extent())
+    assert image_extent == bounds
+    assert splat_extent == bounds
+    assert tuple(float(v) for v in ax.get_xlim()) == bounds[:2]
+    assert tuple(float(v) for v in ax.get_ylim()) == bounds[2:]
+
+
 def test_pl_render_matches_xendata_method(xdata):
     import xentools
 
