@@ -114,6 +114,9 @@ except ImportError:
 create_bins = _pl_namespace.create_bins
 show_ome_tiff = _pl_namespace.show_ome_tiff
 splat = _pl_namespace.splat
+points = _pl_namespace.points
+plot_splat = _pl_namespace.plot_splat
+plot_points = _pl_namespace.plot_points
 
 __all__ = ["XenData"]
 
@@ -885,6 +888,8 @@ class XenData:
         ax.set_title(channel, fontsize=12)
         return ax
 
+    plot_image = show_image
+
     def splat(self,
               genes=None,
               image_channel: Optional[str] = None,
@@ -999,6 +1004,7 @@ class XenData:
             splat_kwargs['bounds'] = bounds
 
         effective_bounds = splat_kwargs['bounds']   # (xmin, xmax, ymin, ymax)
+        existing_image_count = len(ax.images) if ax is not None else 0
 
         # ── optional background image ─────────────────────────────────────────
         if image_channel is not None:
@@ -1024,8 +1030,12 @@ class XenData:
         # ── rasterize via module-level splat() ────────────────────────────────
         rgb, disp, ax = splat(self, genes=genes, ax=ax, return_array="_all", **splat_kwargs)
 
-        # ── RGBA composite (only when a background image is present) ─────────
-        if image_channel is not None:
+        # ── RGBA composite when plotting over an image ────────────────────────
+        # Module-level splat() draws an opaque RGB image. When XenData.splat()
+        # is used as an overlay, convert that newest image to RGBA so black /
+        # zero-signal pixels are transparent and the existing image remains
+        # visible underneath.
+        if image_channel is not None or existing_image_count > 0:
             n_ch = disp.shape[-1]
             if n_ch >= 3:
                 signal = disp[..., :3].max(axis=-1)
@@ -1044,6 +1054,8 @@ class XenData:
         if return_array == "raw":
             return rgb
         raise ValueError("return_array must be False, True, 'display', or 'raw'.")
+
+    plot_splat = splat
 
     def plot_boundaries(
         self,
@@ -1221,6 +1233,77 @@ class XenData:
             show_axis=show_axis,
         )
 
+    def points(
+        self,
+        genes=None,
+        *,
+        bounds=None,
+        quality: str = "all",
+        max_points: Optional[int] = 100_000,
+        random_state: Optional[int] = 0,
+        color: str = "white",
+        palette: Optional[dict] = None,
+        cmap: str = "tab20",
+        marker: str = "o",
+        markers: Optional[dict] = None,
+        s: float = 8,
+        alpha: float = 0.75,
+        linewidths: float = 0,
+        edgecolors="none",
+        ax=None,
+        figsize=(8, 8),
+        background: str = "black",
+        show_axis: bool = False,
+        show_legend: bool = True,
+        legend_loc: str = "outside right",
+        legend_title: Optional[str] = None,
+        max_legend_items: int = 20,
+        preserve_limits: bool = True,
+        rasterized: bool = True,
+        warn_on_sample: bool = True,
+        assigned_only: Optional[bool] = None,
+        return_data: bool = False,
+    ):
+        """
+        Plot individual transcripts as colored point markers.
+
+        Defaults to the active ROI when available and caps rendering at
+        ``max_points`` transcripts by random sampling. Pass an existing ``ax``
+        to composite points over images, splats, or boundary plots.
+        """
+        return _pl_namespace.points(
+            self,
+            genes=genes,
+            bounds=bounds,
+            quality=quality,
+            max_points=max_points,
+            random_state=random_state,
+            color=color,
+            palette=palette,
+            cmap=cmap,
+            marker=marker,
+            markers=markers,
+            s=s,
+            alpha=alpha,
+            linewidths=linewidths,
+            edgecolors=edgecolors,
+            ax=ax,
+            figsize=figsize,
+            background=background,
+            show_axis=show_axis,
+            show_legend=show_legend,
+            legend_loc=legend_loc,
+            legend_title=legend_title,
+            max_legend_items=max_legend_items,
+            preserve_limits=preserve_limits,
+            rasterized=rasterized,
+            warn_on_sample=warn_on_sample,
+            assigned_only=assigned_only,
+            return_data=return_data,
+        )
+
+    plot_points = points
+
     def plot_unassigned_transcripts(
         self,
         bin_size=4):
@@ -1271,6 +1354,112 @@ class XenData:
         Plot cells spatially, colored by niche labels or niche-composition values.
         """
         return _pl_namespace.niche_map(self, **kwargs)
+
+    def render(
+        self,
+        *,
+        image=None,
+        images=None,
+        splat=None,
+        points=None,
+        cells=None,
+        bounds=None,
+        ax=None,
+        figsize=(8, 8),
+        dpi: Optional[int] = None,
+        level: Optional[int] = None,
+        background: str = "black",
+        show_axis: bool = False,
+        title: Optional[str] = None,
+    ):
+        """
+        Render a composite spatial view from image, transcript, and cell layers.
+
+        ``render`` is the high-level compositor for exploratory plots. It
+        controls layer order automatically: image layers are drawn first,
+        transcript splats are drawn over images with transparent zero-signal
+        pixels, transcript points are drawn next, and cell boundaries are drawn
+        last.
+
+        Parameters
+        ----------
+        image : str, dict, list, or None
+            Single image layer specification. A string is interpreted as an
+            image channel, e.g. ``image="DAPI"``. A dictionary with a
+            ``"channel"`` key can include image options, e.g.
+            ``image={"channel": "DAPI", "level": 2, "alpha": 0.5}``.
+        images : list, tuple, dict, or None
+            One or more image layer specifications. A dictionary whose keys are
+            channel names is convenient for multiple channels, e.g.
+            ``images={"DAPI": {"level": 2}, "18S": {"color": "green"}}``.
+            The first image is treated as the background. Later images are
+            converted to transparent signal overlays.
+        splat : str, list, dict, or None
+            Transcript-density layer. A gene string, gene list, or gene-set
+            dictionary is treated as the ``genes`` argument to
+            :meth:`plot_splat`. A dictionary containing plotting option keys can
+            also be used, e.g. ``splat={"genes": ["EPCAM"], "gains": [2]}``.
+        points : str, list, dict, or None
+            Transcript point layer. Accepts the same gene forms as ``splat`` or
+            a dictionary of :meth:`plot_points` options, e.g.
+            ``points={"genes": ["CD3D"], "s": 0.5, "max_points": 20000}``.
+        cells : bool or dict or None
+            If ``True``, draw default cell boundaries last. If a dictionary,
+            pass those options to :meth:`plot_cells`, e.g.
+            ``cells={"edge_alpha": 0.1, "linewidth": 0.3}``.
+        bounds : tuple or None
+            Spatial window as ``(xmin, xmax, ymin, ymax)`` in microns. Defaults
+            to the active ROI when present, otherwise the full transcript frame.
+        ax : matplotlib.axes.Axes or None
+            Existing axes to draw into. If omitted, a new figure and axes are
+            created.
+        figsize : tuple
+            New figure size when ``ax`` is omitted. Default ``(8, 8)``.
+        dpi : int or None
+            New figure DPI when ``ax`` is omitted.
+        level : int or None
+            Default image pyramid level applied to image layers that do not
+            specify their own ``level``.
+        background : str
+            Figure and axes background color when creating a new axes.
+        show_axis : bool
+            Whether to show axis ticks and labels. Default ``False``.
+        title : str or None
+            Optional axes title.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes containing the composite.
+
+        Examples
+        --------
+        Render DAPI, a three-gene splat, one point gene, and cell boundaries:
+
+        >>> ax = xdata.render(
+        ...     image={"channel": "DAPI", "level": 2, "alpha": 0.5},
+        ...     splat={"genes": ["C7", "Epcam", "Tagln"], "gains": [3, 3, 3]},
+        ...     points={"genes": ["Prss3"], "s": 0.4},
+        ...     cells=True,
+        ...     bounds=(500, 1500, 900, 1900),
+        ... )
+        """
+        return _pl_namespace.render(
+            self,
+            image=image,
+            images=images,
+            splat=splat,
+            points=points,
+            cells=cells,
+            bounds=bounds,
+            ax=ax,
+            figsize=figsize,
+            dpi=dpi,
+            level=level,
+            background=background,
+            show_axis=show_axis,
+            title=title,
+        )
 
     def create_binned_adata(self, 
         bin_size=5,

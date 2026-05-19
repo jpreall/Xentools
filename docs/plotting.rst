@@ -8,19 +8,64 @@ For example, these are equivalent in spirit:
 
 .. code-block:: python
 
-   xdata.splat(["EPCAM", "KRT19"])
-   xentools.pl.splat(xdata, ["EPCAM", "KRT19"])
+   xdata.plot_splat(["EPCAM", "KRT19"])
+   xentools.pl.plot_splat(xdata, ["EPCAM", "KRT19"])
+
+Older shorter names such as ``xdata.splat()``, ``xdata.points()``, and
+``xdata.show_image()`` remain available as aliases.
+
+Composite Rendering
+-------------------
+
+``render`` is the high-level compositor for common exploratory views. It puts
+image layers on the bottom, splats on top of images with transparent
+zero-signal pixels, then point and cell-boundary overlays last.
+
+.. code-block:: python
+
+   ax = xdata.render(
+       image={"channel": "DAPI", "level": 2},
+       splat={
+           "genes": ["C7", "Epcam", "Tagln"],
+           "gains": [3, 3, 3],
+       },
+       points={
+           "genes": ["Prss3"],
+           "s": 0.4,
+       },
+       cells=True,
+       bounds=(500, 1500, 900, 1900),
+   )
+
+For multiple image channels, pass ``images``. The first image is treated as
+the background; later images are converted into transparent signal overlays so
+dark pixels do not cover the lower layers.
+
+.. code-block:: python
+
+   ax = xdata.render(
+       images={
+           "DAPI": {"level": 2},
+           "18S": {"level": 2, "color": "green", "alpha": 0.6},
+       },
+       splat={"genes": ["C7", "Epcam", "Tagln"], "gains": [3, 3, 3]},
+       bounds=(500, 1500, 900, 1900),
+   )
+
+The lower-level plotting functions below remain useful when you want manual
+control over every layer. See :doc:`rendering` for a fuller guide to the
+compositor interface and layer option schemas.
 
 Transcript Splats
 -----------------
 
-``splat`` rasterizes transcript coordinates into one or more image channels.
-It is useful for visualizing marker genes or gene signatures over spatial
-regions.
+``plot_splat`` rasterizes transcript coordinates into one or more image
+channels. It is useful for visualizing marker genes or gene signatures over
+spatial regions.
 
 .. code-block:: python
 
-   ax = xdata.splat(
+   ax = xdata.plot_splat(
        genes=["EPCAM", "COL1A1", "PTPRC"],
        sigma_um=2.0,
        pixel_size_um=1.0,
@@ -32,7 +77,7 @@ the listed genes are summed into that channel.
 
 .. code-block:: python
 
-   ax = xdata.splat(
+   ax = xdata.plot_splat(
        genes={
            "R": ["EPCAM", "KRT19"],
            "G": ["COL1A1", "DCN"],
@@ -45,17 +90,53 @@ return image arrays for downstream processing:
 
 .. code-block:: python
 
-   display = xdata.splat(["EPCAM"], return_array=True)
-   raw = xdata.splat(["EPCAM"], return_array="raw")
+   display = xdata.plot_splat(["EPCAM"], return_array=True)
+   raw = xdata.plot_splat(["EPCAM"], return_array="raw")
+
+Transcript Points
+-----------------
+
+``plot_points`` draws individual transcript molecules as matplotlib scatter
+markers. Use this for focused ROIs where seeing single molecules is useful;
+for dense regions or whole-slide views, ``plot_splat`` is usually faster and
+more readable.
+
+.. code-block:: python
+
+   ax = xdata.plot_points(
+       genes=["EPCAM", "KRT19"],
+       max_points=50_000,
+       s=6,
+       alpha=0.7,
+   )
+
+When ``genes`` is a dictionary, each key becomes a point category:
+
+.. code-block:: python
+
+   ax = xdata.plot_points(
+       genes={
+           "epithelial": ["EPCAM", "KRT19"],
+           "immune": ["PTPRC", "CD3D"],
+       },
+       markers={"epithelial": "o", "immune": "^"},
+   )
+
+To avoid accidentally sending millions of artists to matplotlib,
+``plot_points`` randomly samples to ``max_points=100_000`` by default. Pass
+``max_points=None`` to draw every matching transcript. For DataFrame/parquet
+transcripts with a ``cell_id`` column, ``plot_points`` defaults to assigned
+cell transcripts only; pass ``assigned_only=False`` to include unassigned
+transcripts.
 
 Images
 ------
 
-``show_image`` displays morphology or protein OME-TIFF channels:
+``plot_image`` displays morphology or protein OME-TIFF channels:
 
 .. code-block:: python
 
-   ax = xdata.show_image("DAPI", level=3)
+   ax = xdata.plot_image("DAPI", level=3)
 
 If the image is pyramidal, choose a level appropriate for display. Higher
 levels are typically lower resolution and faster to display.
@@ -68,7 +149,7 @@ both as a standalone plot and as an overlay on a splat or image axes.
 
 .. code-block:: python
 
-   ax = xdata.splat(["EPCAM", "KRT19"])
+   ax = xdata.plot_splat(["EPCAM", "KRT19"])
    xdata.plot_boundaries(kind="cell", ax=ax, color_by="Cluster")
 
 Boundary legends default to positions outside the plot where possible. The
@@ -110,11 +191,12 @@ After computing niches with ``xentools.build_niches()``, visualize them with:
 Layering
 --------
 
-Because plotting functions return standard matplotlib axes, simple manual
-composition is usually enough:
+For most composite plots, prefer ``render``. For manual composition, plotting
+functions return standard matplotlib axes:
 
 .. code-block:: python
 
-   ax = xdata.show_image("DAPI", level=3, figsize=(8, 8))
-   xdata.splat(["EPCAM", "KRT19"], ax=ax, show_legend=False)
+   ax = xdata.plot_image("DAPI", level=3, figsize=(8, 8))
+   xdata.plot_splat(["EPCAM", "KRT19"], ax=ax, show_legend=False)
+   xdata.plot_points(["CD3D"], ax=ax, max_points=20_000, color="cyan")
    xdata.plot_boundaries(kind="cell", ax=ax, edge_alpha=0.2)

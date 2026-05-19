@@ -14,6 +14,11 @@ Top-Level API
    xentools.LazyBoundaryGeoDataFrame
    xentools.ROI
    xentools.ROICollection
+   xentools.plot_image
+   xentools.plot_points
+   xentools.plot_splat
+   xentools.render
+   xentools.points
    xentools.splat
    xentools.show_ome_tiff
    xentools.plot_boundaries
@@ -35,6 +40,11 @@ Plotting Namespace
 .. autosummary::
 
    xentools.pl.splat
+   xentools.pl.points
+   xentools.pl.plot_splat
+   xentools.pl.plot_points
+   xentools.pl.plot_image
+   xentools.pl.render
    xentools.pl.show_ome_tiff
    xentools.pl.plot_boundaries
    xentools.pl.plot_cells

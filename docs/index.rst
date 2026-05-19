@@ -26,6 +26,7 @@ Contents
    concepts
    analysis
    plotting
+   rendering
    lazy_transcripts
    api
 

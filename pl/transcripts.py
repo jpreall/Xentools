@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Union
+from typing import Optional, Union
+import warnings
 
 import matplotlib.pyplot as pl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.ndimage import gaussian_filter
 
@@ -27,6 +29,7 @@ __all__ = [
     "plot_binned_rgb",
     "create_multilayer_image",
     "plot_binned_greyscale",
+    "points",
     "splat",
 ]
 
@@ -45,6 +48,187 @@ def _is_lazy_transcripts(obj) -> bool:
         and hasattr(obj, "_gene_names")
         and hasattr(obj, "_tile_meta")
     )
+
+
+def _normalize_genes_for_query(genes):
+    if genes is None:
+        return None
+    if isinstance(genes, str):
+        return [genes]
+    if isinstance(genes, dict):
+        return list(dict.fromkeys(gene for gene_list in genes.values() for gene in gene_list))
+    return list(genes)
+
+
+def _resolve_active_roi(data, bounds):
+    if bounds is not None or not hasattr(data, "active_roi"):
+        return None
+    roi = getattr(data, "active_roi", None)
+    if roi is None:
+        roi = getattr(data, "subset_roi", None)
+    return roi
+
+
+def _filter_transcript_dataframe(
+    df,
+    genes=None,
+    bounds=None,
+    roi=None,
+    assigned_only=None,
+    x_col="x_location",
+    y_col="y_location",
+    gene_col="feature_name",
+):
+    if df is None or len(df) == 0:
+        return df
+
+    mask = np.ones(len(df), dtype=bool)
+    query_genes = _normalize_genes_for_query(genes)
+    if query_genes is not None:
+        mask &= df[gene_col].isin(query_genes).to_numpy()
+
+    if assigned_only is None:
+        assigned_only = "cell_id" in df.columns
+    if assigned_only and "cell_id" in df.columns:
+        cell_ids = df["cell_id"].astype(str).to_numpy()
+        mask &= (cell_ids != "UNASSIGNED") & (cell_ids != "") & (cell_ids != "nan")
+
+    if bounds is not None:
+        xmin, xmax, ymin, ymax = bounds
+        mask &= (
+            (df[x_col].to_numpy() >= xmin)
+            & (df[x_col].to_numpy() <= xmax)
+            & (df[y_col].to_numpy() >= ymin)
+            & (df[y_col].to_numpy() <= ymax)
+        )
+
+    out = df.loc[mask]
+    if roi is not None and len(out):
+        out = roi.crop_dataframe(out, x_col=x_col, y_col=y_col)
+    return out
+
+
+def _sample_dataframe(df, max_points=None, random_state=0):
+    if max_points is None or len(df) <= max_points:
+        return df.copy(), False
+    return df.sample(n=int(max_points), random_state=random_state).copy(), True
+
+
+def _priority_sample_lazy_transcripts(
+    lazy_transcripts,
+    *,
+    genes=None,
+    bounds=None,
+    roi=None,
+    quality="all",
+    max_points=100_000,
+    random_state=0,
+):
+    query_genes = _normalize_genes_for_query(genes)
+    query_kwargs = {}
+    if bounds is not None:
+        query_kwargs.update(xmin=bounds[0], xmax=bounds[1], ymin=bounds[2], ymax=bounds[3])
+
+    rng = np.random.default_rng(random_state)
+    total = 0
+    reservoir = []
+    for _tile_key, tile_df in lazy_transcripts.iter_tiles(genes=query_genes, quality=quality, **query_kwargs):
+        if roi is not None and len(tile_df):
+            tile_df = roi.crop_dataframe(tile_df)
+        if len(tile_df) == 0:
+            continue
+
+        total += len(tile_df)
+        if max_points is None:
+            reservoir.append(tile_df)
+            continue
+
+        tile_df = tile_df.copy()
+        tile_df["_xentools_sample_priority"] = rng.random(len(tile_df))
+        reservoir.append(tile_df)
+        combined = pd.concat(reservoir, ignore_index=True)
+        if len(combined) > max_points:
+            combined = combined.nsmallest(int(max_points), "_xentools_sample_priority")
+        reservoir = [combined]
+
+    if not reservoir:
+        return pd.DataFrame(columns=["x_location", "y_location", "feature_name"]), 0, False
+
+    sampled = pd.concat(reservoir, ignore_index=True)
+    if "_xentools_sample_priority" in sampled.columns:
+        sampled = sampled.drop(columns="_xentools_sample_priority")
+    return sampled, total, max_points is not None and total > max_points
+
+
+def _prepare_point_dataframe(
+    data,
+    *,
+    genes=None,
+    bounds=None,
+    quality="all",
+    max_points=100_000,
+    random_state=0,
+    assigned_only=None,
+    x_col="x_location",
+    y_col="y_location",
+    gene_col="feature_name",
+):
+    roi = _resolve_active_roi(data, bounds)
+    if bounds is None and roi is not None:
+        bounds = roi.bounds
+
+    if hasattr(data, "trans") and not isinstance(data, pd.DataFrame):
+        source = data.trans
+    else:
+        source = data
+
+    if _is_lazy_transcripts(source):
+        df, total, sampled = _priority_sample_lazy_transcripts(
+            source,
+            genes=genes,
+            bounds=bounds,
+            roi=roi,
+            quality=quality,
+            max_points=max_points,
+            random_state=random_state,
+        )
+        return df, bounds, roi, total, sampled
+
+    if not isinstance(source, pd.DataFrame):
+        raise ValueError("data must be XenData, LazyTranscripts, or pd.DataFrame")
+
+    df = _filter_transcript_dataframe(
+        source,
+        genes=genes,
+        bounds=bounds,
+        roi=roi,
+        assigned_only=assigned_only,
+        x_col=x_col,
+        y_col=y_col,
+        gene_col=gene_col,
+    )
+    total = len(df)
+    df, sampled = _sample_dataframe(df, max_points=max_points, random_state=random_state)
+    return df, bounds, roi, total, sampled
+
+
+def _point_groups(df, genes=None, gene_col="feature_name"):
+    if genes is None:
+        return pd.Series("transcripts", index=df.index, dtype=object), ["transcripts"]
+    if isinstance(genes, dict):
+        mapping = {}
+        for label, gene_list in genes.items():
+            for gene in gene_list:
+                mapping[gene] = label
+        groups = df[gene_col].map(mapping).fillna("other").astype(object)
+        labels = [label for label in genes if label in set(groups)]
+        if "other" in set(groups):
+            labels.append("other")
+        return groups, labels
+    groups = df[gene_col].astype(object)
+    labels = list(dict.fromkeys(_normalize_genes_for_query(genes) or groups.dropna().tolist()))
+    labels = [label for label in labels if label in set(groups)]
+    return groups, labels
 
 
 def create_bins(df, bin_size=5):
@@ -429,6 +613,203 @@ def plot_binned_greyscale(xdata, genes, fig_scale=10, gamma=1, log=False, flip=T
     ax.imshow(imdata, cmap=cmap)
     ax.axis("off")
     pl.show()
+
+
+def points(
+    data=None,
+    genes: Union[None, str, list[str], dict] = None,
+    *,
+    bounds=None,
+    quality: str = "all",
+    max_points: Optional[int] = 100_000,
+    random_state: Optional[int] = 0,
+    x_col: str = "x_location",
+    y_col: str = "y_location",
+    gene_col: str = "feature_name",
+    color: str = "white",
+    palette: Optional[dict] = None,
+    cmap: str = "tab20",
+    marker: str = "o",
+    markers: Optional[dict] = None,
+    s: float = 8,
+    alpha: float = 0.75,
+    linewidths: float = 0,
+    edgecolors="none",
+    ax=None,
+    figsize=(8, 8),
+    background: str = "black",
+    show_axis: bool = False,
+    show_legend: bool = True,
+    legend_loc: str = "outside right",
+    legend_title: Optional[str] = None,
+    max_legend_items: int = 20,
+    preserve_limits: bool = True,
+    rasterized: bool = True,
+    warn_on_sample: bool = True,
+    assigned_only: Optional[bool] = None,
+    return_data: bool = False,
+):
+    """
+    Plot individual transcripts as point markers.
+
+    This is intended for focused ROIs and compositing with existing image,
+    splat, or boundary axes. For lazy zarr-backed transcripts, capped plotting
+    uses streaming tile reads plus random priority sampling, so large queries
+    do not need to materialize every matching transcript before downsampling.
+
+    Set ``max_points=None`` to draw every matching transcript.
+    """
+    import matplotlib.colors as mcolors
+
+    owns_ax = ax is None
+    if max_points is not None and max_points <= 0:
+        raise ValueError("max_points must be a positive integer or None.")
+
+    df, resolved_bounds, _roi, total_points, sampled = _prepare_point_dataframe(
+        data,
+        genes=genes,
+        bounds=bounds,
+        quality=quality,
+        max_points=max_points,
+        random_state=random_state,
+        assigned_only=assigned_only,
+        x_col=x_col,
+        y_col=y_col,
+        gene_col=gene_col,
+    )
+
+    if sampled and warn_on_sample:
+        warnings.warn(
+            f"points() sampled {len(df):,} of {total_points:,} matching transcripts. "
+            "Pass max_points=None to draw all points, or increase max_points.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    if owns_ax:
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_facecolor(background)
+        ax.set_facecolor(background)
+    else:
+        old_xlim = ax.get_xlim()
+        old_ylim = ax.get_ylim()
+
+    if len(df) == 0:
+        if owns_ax and not show_axis:
+            ax.set_axis_off()
+        return (ax, df) if return_data else ax
+
+    if resolved_bounds is None:
+        xmin = float(df[x_col].min())
+        xmax = float(df[x_col].max())
+        ymin = float(df[y_col].min())
+        ymax = float(df[y_col].max())
+    else:
+        xmin, xmax, ymin, ymax = map(float, resolved_bounds)
+
+    y_lo, y_hi = (ymin, ymax) if owns_ax else ax.get_ylim()
+    plot_y = y_lo + y_hi - df[y_col].to_numpy()
+    groups, labels = _point_groups(df, genes=genes, gene_col=gene_col)
+
+    if genes is None:
+        ax.scatter(
+            df[x_col].to_numpy(),
+            plot_y,
+            c=color,
+            marker=marker,
+            s=s,
+            alpha=alpha,
+            linewidths=linewidths,
+            edgecolors=edgecolors,
+            rasterized=rasterized,
+        )
+    else:
+        if palette is None:
+            colors = plt.get_cmap(cmap)(np.linspace(0, 1, max(1, len(labels))))
+            palette = {label: mcolors.to_hex(colors[i]) for i, label in enumerate(labels)}
+
+        handles = []
+        group_values = groups.to_numpy()
+        for label in labels:
+            mask = group_values == label
+            if not mask.any():
+                continue
+            this_marker = markers.get(label, marker) if markers is not None else marker
+            this_color = palette.get(label, color)
+            ax.scatter(
+                df.loc[mask, x_col].to_numpy(),
+                plot_y[mask],
+                c=this_color,
+                marker=this_marker,
+                s=s,
+                alpha=alpha,
+                linewidths=linewidths,
+                edgecolors=edgecolors,
+                rasterized=rasterized,
+            )
+            handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker=this_marker,
+                    linestyle="",
+                    color=this_color,
+                    label=str(label),
+                    markersize=max(4, np.sqrt(s)),
+                    alpha=alpha,
+                )
+            )
+
+        if show_legend and handles and len(handles) <= max_legend_items:
+            legend_kwargs = dict(
+                handles=handles,
+                title=legend_title or ("gene set" if isinstance(genes, dict) else gene_col),
+                fontsize="small",
+                title_fontsize="small",
+                labelcolor="white",
+                facecolor="black",
+                edgecolor="black",
+                framealpha=0.85,
+            )
+            if legend_loc == "outside right":
+                ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0, **legend_kwargs)
+            elif legend_loc == "outside left":
+                ax.legend(loc="center right", bbox_to_anchor=(-0.02, 0.5), borderaxespad=0, **legend_kwargs)
+            elif legend_loc == "outside bottom":
+                ax.legend(
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, -0.02),
+                    borderaxespad=0,
+                    ncol=min(len(handles), 6),
+                    **legend_kwargs,
+                )
+            elif legend_loc == "outside top":
+                ax.legend(
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.02),
+                    borderaxespad=0,
+                    ncol=min(len(handles), 6),
+                    **legend_kwargs,
+                )
+            else:
+                ax.legend(loc=legend_loc, **legend_kwargs)
+
+    if owns_ax:
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+    elif preserve_limits:
+        ax.set_xlim(old_xlim)
+        ax.set_ylim(old_ylim)
+
+    ax.set_aspect("equal")
+    if not show_axis:
+        ax.set_axis_off()
+    else:
+        ax.set_xlabel("x (um)")
+        ax.set_ylabel("y (um)")
+    ax.grid(False)
+
+    return (ax, df) if return_data else ax
 
 
 def splat(

@@ -146,6 +146,11 @@ create_multilayer_image = _pl_namespace.create_multilayer_image
 plot_binned_greyscale = _pl_namespace.plot_binned_greyscale
 plot_boundaries = _pl_namespace.plot_boundaries
 plot_cells = _pl_namespace.plot_cells
+points = _pl_namespace.points
+plot_points = _pl_namespace.plot_points
+plot_splat = _pl_namespace.plot_splat
+plot_image = _pl_namespace.plot_image
+render = _pl_namespace.render
 niche_heatmap = _pl_namespace.niche_heatmap
 niche_map = _pl_namespace.niche_map
 show_ome_tiff = _pl_namespace.show_ome_tiff
@@ -193,6 +198,11 @@ __all__ = [
     "plot_binned_greyscale",
     "plot_boundaries",
     "plot_cells",
+    "points",
+    "plot_points",
+    "plot_splat",
+    "plot_image",
+    "render",
     "niche_heatmap",
     "niche_map",
     "show_ome_tiff",

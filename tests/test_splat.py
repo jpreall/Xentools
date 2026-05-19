@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import matplotlib.axes
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -84,6 +85,35 @@ def test_xentools_pl_splat_matches_default_axes_contract(xdata):
     )
 
     assert isinstance(ax, matplotlib.axes.Axes)
+
+
+def test_xendata_splat_over_existing_image_uses_transparent_rgba_overlay(xdata):
+    genes = _test_genes(xdata)
+    bounds = _coarse_bounds(xdata)
+    _, ax = plt.subplots()
+    ax.imshow(
+        np.zeros((20, 20)),
+        extent=bounds,
+        origin="lower",
+        cmap="gray",
+    )
+
+    returned = xdata.plot_splat(
+        genes,
+        ax=ax,
+        bounds=bounds,
+        pixel_size_um=100,
+        sigma_um=1,
+        show_legend=False,
+        splat_alpha=0.5,
+    )
+
+    overlay = returned.images[-1].get_array()
+    assert returned is ax
+    assert len(ax.images) == 2
+    assert overlay.ndim == 3
+    assert overlay.shape[-1] == 4
+    assert np.nanmax(overlay[..., 3]) <= 0.5
 
 
 def test_splat_rejects_unknown_return_array_mode(xdata):

@@ -13,6 +13,11 @@ def test_top_level_module_has_explicit_public_api():
         "ROI_to_pixels",
         "import_cell_annotations",
         "neighborhood_composition",
+        "points",
+        "plot_points",
+        "plot_splat",
+        "plot_image",
+        "render",
         "splat",
         "show_ome_tiff",
         "plot_cells",
@@ -55,6 +60,14 @@ def test_plotting_reexports_point_to_pl_namespace():
     assert xentools.splat is xentools.pl.splat
     assert xentools.show_ome_tiff is xentools.pl.show_ome_tiff
     assert xentools.plot_cells is xentools.pl.plot_cells
+    assert xentools.points is xentools.pl.points
+    assert xentools.plot_points is xentools.pl.plot_points
+    assert xentools.plot_splat is xentools.pl.plot_splat
+    assert xentools.plot_image is xentools.pl.plot_image
+    assert xentools.render is xentools.pl.render
+    assert xentools.pl.plot_points is xentools.pl.points
+    assert xentools.pl.plot_splat is xentools.pl.splat
+    assert xentools.pl.plot_image is xentools.pl.show_ome_tiff
     assert xentools.niche_heatmap is xentools.pl.niche_heatmap
     assert xentools.niche_map is xentools.pl.niche_map
     assert xentools.plot_binned_rgb is xentools.pl.plot_binned_rgb

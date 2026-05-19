@@ -24,13 +24,13 @@ Plot one or more genes as smoothed transcript-density channels:
 
 .. code-block:: python
 
-   ax = xdata.splat(["CCND1", "NHERF1", "OR4F17"])
+   ax = xdata.plot_splat(["CCND1", "NHERF1", "OR4F17"])
 
 Use a dictionary to combine gene sets into channels:
 
 .. code-block:: python
 
-   ax = xdata.splat(
+   ax = xdata.plot_splat(
        {
            "Epithelial": ["EPCAM", "KRT19"],
            "Stroma": ["COL1A1", "DCN"],
@@ -43,7 +43,7 @@ Return the rendered array instead of the axes:
 
 .. code-block:: python
 
-   arr = xdata.splat(["EPCAM", "KRT19"], return_array=True)
+   arr = xdata.plot_splat(["EPCAM", "KRT19"], return_array=True)
 
 Show Images
 -----------
@@ -52,7 +52,22 @@ Display a morphology or protein image channel:
 
 .. code-block:: python
 
-   ax = xdata.show_image("DAPI", level=3)
+   ax = xdata.plot_image("DAPI", level=3)
+
+Render Composite Views
+----------------------
+
+Use ``render`` when combining images, transcript splats, points, and cell
+boundaries:
+
+.. code-block:: python
+
+   ax = xdata.render(
+       image={"channel": "DAPI", "level": 3},
+       splat={"genes": ["EPCAM", "KRT19"], "gains": [2, 2]},
+       points={"genes": ["CD3D"], "max_points": 20_000, "color": "cyan"},
+       cells=True,
+   )
 
 Overlay Boundaries
 ------------------
@@ -62,7 +77,7 @@ axes:
 
 .. code-block:: python
 
-   ax = xdata.splat(["EPCAM", "KRT19"])
+   ax = xdata.plot_splat(["EPCAM", "KRT19"])
    xdata.plot_boundaries(kind="cell", ax=ax, color_by="Cluster")
 
 Plot Cells by Expression
@@ -93,7 +108,7 @@ Set the active ROI and plot within that region:
 .. code-block:: python
 
    xdata.set_active_roi("Tumor")
-   ax = xdata.splat(["EPCAM", "KRT19"])
+   ax = xdata.plot_splat(["EPCAM", "KRT19"])
    xdata.plot_boundaries(kind="cell", ax=ax)
 
 Create a new ROI manually:
