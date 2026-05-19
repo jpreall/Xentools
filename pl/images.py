@@ -6,6 +6,7 @@ import matplotlib.pyplot as pl
 import numpy as np
 
 from ._shared import _load_local_module
+from ._save import save_figure
 
 try:
     from ..io.read.images import _source_series_level_arrays
@@ -37,6 +38,8 @@ def show_ome_tiff(
     micron_coords: bool = False,
     ax=None,
     verbose: bool = True,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     import tifffile
 
@@ -171,4 +174,5 @@ def show_ome_tiff(
     if own_fig:
         pl.tight_layout()
 
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     return ax

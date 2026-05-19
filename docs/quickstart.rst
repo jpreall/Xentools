@@ -67,6 +67,7 @@ boundaries:
        splat={"genes": ["EPCAM", "KRT19"], "gains": [2, 2]},
        points={"genes": ["CD3D"], "max_points": 20_000, "color": "cyan"},
        cells=True,
+       save="figures/composite.png",
    )
 
 Overlay Boundaries

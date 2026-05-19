@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ._shared import _load_local_module
+from ._save import save_figure
 
 try:
     from ..core.rois import _roi_bounds_um
@@ -111,6 +112,8 @@ def plot_boundaries(
     legend_title: Optional[str] = None,
     background: str = "black",
     show_axis: bool = False,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Overlay cell or nucleus boundary polygons on an axes.
@@ -180,6 +183,7 @@ def plot_boundaries(
             ax.set_facecolor(background)
             if not show_axis:
                 ax.set_axis_off()
+        save_figure(ax, save=save, save_kwargs=save_kwargs)
         return ax
 
     if max_cells is not None and len(gdf) > max_cells:
@@ -381,6 +385,7 @@ def plot_boundaries(
         if label:
             cbar.set_label(label)
 
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     return ax
 
 
@@ -409,6 +414,8 @@ def plot_cells(
     legend_title: Optional[str] = None,
     background: str = "black",
     show_axis: bool = False,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Plot cell boundary polygons, optionally filled by gene expression.
@@ -443,4 +450,6 @@ def plot_cells(
         legend_title=legend_title,
         background=background,
         show_axis=show_axis,
+        save=save,
+        save_kwargs=save_kwargs,
     )

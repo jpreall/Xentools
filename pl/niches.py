@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .boundaries import plot_cells
+from ._save import save_figure
 
 
 __all__ = ["niche_heatmap", "niche_map"]
@@ -98,6 +99,8 @@ def niche_heatmap(
     value_fmt: str = ".2f",
     cbar: bool = True,
     title: Optional[str] = None,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Plot a heatmap of mean neighborhood composition by niche label.
@@ -154,6 +157,7 @@ def niche_heatmap(
         ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="Mean composition")
 
     ax.grid(False)
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     return ax
 
 
@@ -180,6 +184,8 @@ def niche_map(
     show_legend: bool = True,
     legend_loc: str = "outside right",
     title: Optional[str] = None,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Plot cells spatially, colored by niche label or niche-composition value.
@@ -244,6 +250,8 @@ def niche_map(
                 colorbar_label=color_label,
                 background=background,
                 show_axis=show_axis,
+                save=save,
+                save_kwargs=save_kwargs,
             )
             if title is not None:
                 ax.set_title(title)
@@ -327,4 +335,5 @@ def niche_map(
     ax.set_title(title or color_label)
     if not show_axis:
         ax.set_axis_off()
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     return ax

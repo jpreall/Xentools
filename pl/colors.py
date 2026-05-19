@@ -4,6 +4,8 @@ from __future__ import annotations
 
 __all__ = ["generate_palette", "plot_palette"]
 
+from ._save import save_figure
+
 
 def generate_palette(n, lightness=0.5, sat_min=0.5, sat_max=1.0, preview=False):
     """
@@ -25,7 +27,7 @@ def generate_palette(n, lightness=0.5, sat_min=0.5, sat_max=1.0, preview=False):
     return palette
 
 
-def plot_palette(palette):
+def plot_palette(palette, save=None, save_kwargs=None):
     """
     Plot a palette of colors as a horizontal strip.
     """
@@ -39,4 +41,6 @@ def plot_palette(palette):
     ax.set_xlim(0, n)
     ax.set_ylim(0, 1)
     ax.axis("off")
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     plt.show()
+    return ax

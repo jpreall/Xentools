@@ -11,6 +11,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.ndimage import gaussian_filter
 
+from ._save import save_figure
 from ._shared import _load_local_module
 
 try:
@@ -281,6 +282,8 @@ def rasterize(
     vmin=None,
     title: str = "",
     return_img=False,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Rasterize selected transcript features into a simple binned image.
@@ -348,9 +351,9 @@ def rasterize(
     if return_img:
         return img
 
-    plt.figure(figsize=(w / dpi, h / dpi), dpi=dpi)
-    plt.imshow(img, cmap=colormap)
-    plt.axis("off")
+    fig, ax = plt.subplots(figsize=(w / dpi, h / dpi), dpi=dpi)
+    ax.imshow(img, cmap=colormap)
+    ax.axis("off")
 
     if title == "":
         if len(valid_features) < 3:
@@ -358,12 +361,13 @@ def rasterize(
         else:
             title = ", ".join(valid_features[:3]) + "..."
 
-    plt.title(title, fontsize=12)
-    plt.tight_layout()
+    ax.set_title(title, fontsize=12)
+    fig.tight_layout()
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     plt.show()
 
 
-def rasterize_rgb(xdata, genes_or_gene_sets, bin_size=8, fig_scale=10, gammas=[1, 1, 1], log=False, include_unassigned=False):
+def rasterize_rgb(xdata, genes_or_gene_sets, bin_size=8, fig_scale=10, gammas=[1, 1, 1], log=False, include_unassigned=False, save=None, save_kwargs: Optional[dict] = None):
     from PIL import Image
 
     df = xdata.trans
@@ -433,10 +437,11 @@ def rasterize_rgb(xdata, genes_or_gene_sets, bin_size=8, fig_scale=10, gammas=[1
         edgecolor="black",
     )
     pl.tight_layout()
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     pl.show()
 
 
-def plot_binned_rgb(xdata, genes_or_gene_sets, norm="per_gene", fig_scale=10, gammas=[1, 1, 1], log=False, flip=True, bounds: tuple | None = None):
+def plot_binned_rgb(xdata, genes_or_gene_sets, norm="per_gene", fig_scale=10, gammas=[1, 1, 1], log=False, flip=True, bounds: tuple | None = None, save=None, save_kwargs: Optional[dict] = None):
     from PIL import Image
     import anndata as ad
 
@@ -518,6 +523,7 @@ def plot_binned_rgb(xdata, genes_or_gene_sets, norm="per_gene", fig_scale=10, ga
         edgecolor="black",
     )
     pl.tight_layout()
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     pl.show()
 
 
@@ -568,7 +574,7 @@ def create_multilayer_image(xdata, genes, log=False):
     return imdata[::-1, :, :]
 
 
-def plot_binned_greyscale(xdata, genes, fig_scale=10, gamma=1, log=False, flip=True, return_img=False, cmap="inferno"):
+def plot_binned_greyscale(xdata, genes, fig_scale=10, gamma=1, log=False, flip=True, return_img=False, cmap="inferno", save=None, save_kwargs: Optional[dict] = None):
     import anndata as ad
     from scipy.sparse import issparse
 
@@ -612,6 +618,7 @@ def plot_binned_greyscale(xdata, genes, fig_scale=10, gamma=1, log=False, flip=T
     fig, ax = pl.subplots(figsize=[fig_scale * aspect_ratio, fig_scale])
     ax.imshow(imdata, cmap=cmap)
     ax.axis("off")
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     pl.show()
 
 
@@ -647,6 +654,8 @@ def points(
     rasterized: bool = True,
     warn_on_sample: bool = True,
     assigned_only: Optional[bool] = None,
+    save=None,
+    save_kwargs: Optional[dict] = None,
     return_data: bool = False,
 ):
     """
@@ -697,6 +706,7 @@ def points(
     if len(df) == 0:
         if owns_ax and not show_axis:
             ax.set_axis_off()
+        save_figure(ax, save=save, save_kwargs=save_kwargs)
         return (ax, df) if return_data else ax
 
     if resolved_bounds is None:
@@ -809,6 +819,7 @@ def points(
         ax.set_ylabel("y (um)")
     ax.grid(False)
 
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     return (ax, df) if return_data else ax
 
 
@@ -829,6 +840,8 @@ def splat(
     show_legend: bool = True,
     legend_loc: str = "outside right",
     return_array=False,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Rasterize transcript positions into one or more display channels.
@@ -985,6 +998,7 @@ def splat(
     else:
         ax.set_title(", ".join(chan_names[:3]))
 
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     if return_array in (False, None):
         return ax
     if return_array is True or return_array == "display":

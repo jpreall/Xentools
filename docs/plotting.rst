@@ -14,6 +14,23 @@ For example, these are equivalent in spirit:
 Older shorter names such as ``xdata.splat()``, ``xdata.points()``, and
 ``xdata.show_image()`` remain available as aliases.
 
+Saving Figures
+--------------
+
+Most plotting functions accept ``save`` and ``save_kwargs``:
+
+.. code-block:: python
+
+   ax = xdata.plot_splat(
+       ["EPCAM", "KRT19"],
+       save="figures/epithelial_splat.png",
+       save_kwargs={"dpi": 300},
+   )
+
+``save`` can be a string or path-like object. Parent directories are created
+automatically. ``save_kwargs`` is forwarded to Matplotlib's
+``Figure.savefig``; by default xentools uses ``bbox_inches="tight"``.
+
 Composite Rendering
 -------------------
 
@@ -35,6 +52,7 @@ zero-signal pixels, then point and cell-boundary overlays last.
        },
        cells=True,
        bounds=(500, 1500, 900, 1900),
+       save="figures/composite.png",
    )
 
 For multiple image channels, pass ``images``. The first image is treated as

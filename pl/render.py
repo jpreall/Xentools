@@ -4,6 +4,8 @@ from typing import Optional
 
 import numpy as np
 
+from ._save import save_figure
+
 
 __all__ = ["render"]
 
@@ -201,6 +203,8 @@ def render(
     background: str = "black",
     show_axis: bool = False,
     title: Optional[str] = None,
+    save=None,
+    save_kwargs: Optional[dict] = None,
 ):
     """
     Render a composite spatial view from common XenData layer types.
@@ -279,6 +283,10 @@ def render(
         Whether to show axis ticks and labels.
     title
         Optional axes title.
+    save
+        Optional path to save the rendered figure.
+    save_kwargs
+        Optional dictionary forwarded to ``Figure.savefig``.
 
     Returns
     -------
@@ -371,4 +379,5 @@ def render(
     if not show_axis:
         ax.set_axis_off()
     ax.set_aspect("equal")
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
     return ax

@@ -65,6 +65,7 @@ try:
         write_xenium_explorer as _write_xenium_explorer_bundle,
     )
     from ..utils.geometry import frame
+    from ..pl._save import save_figure as _save_figure
     from .. import pl as _pl_namespace
 except ImportError:
     _binning_mod = _load_local_module(
@@ -99,6 +100,10 @@ except ImportError:
         "_xentools_pl_for_xendata",
         os.path.join("..", "pl", "__init__.py"),
     )
+    _save_mod = _load_local_module(
+        "_xentools_pl_save_for_xendata",
+        os.path.join("..", "pl", "_save.py"),
+    )
 
     _create_binned_adata = _binning_mod.create_binned_adata
     _neighborhood_composition = _neighborhoods_mod.neighborhood_composition
@@ -109,6 +114,7 @@ except ImportError:
     _write_geo_submission_bundle = _xenium_write_mod.write_geo_submission
     _write_xenium_explorer_bundle = _xenium_write_mod.write_xenium_explorer
     frame = _geometry_mod.frame
+    _save_figure = _save_mod.save_figure
 
 
 create_bins = _pl_namespace.create_bins
@@ -745,7 +751,9 @@ class XenData:
         vmax=None,
         vmin=None,
         title: str='',
-        return_img = False):
+        return_img=False,
+        save=None,
+        save_kwargs: Optional[dict] = None):
         """
         Rasterizes the transcript data for specified features into a binned image.
         Parameters:
@@ -768,6 +776,8 @@ class XenData:
             vmin=vmin,
             title=title,
             return_img=return_img,
+            save=save,
+            save_kwargs=save_kwargs,
         )
 
     def show_image(self,
@@ -783,7 +793,9 @@ class XenData:
                    micron_coords: Optional[bool] = None,
                    ax=None,
                    clip_percentile: float = 99.5,
-                   verbose: bool = True):
+                   verbose: bool = True,
+                   save=None,
+                   save_kwargs: Optional[dict] = None):
         """
         Display an OME-TIFF image from this XenData object in a Jupyter-friendly way.
 
@@ -886,6 +898,7 @@ class XenData:
             verbose=verbose,
         )
         ax.set_title(channel, fontsize=12)
+        _save_figure(ax, save=save, save_kwargs=save_kwargs)
         return ax
 
     plot_image = show_image
@@ -906,6 +919,8 @@ class XenData:
               splat_cmap: str = 'hot',
               return_array=False,
               ax=None,
+              save=None,
+              save_kwargs: Optional[dict] = None,
               **splat_kwargs):
         """
         Rasterize transcript data as a coloured image, optionally composited
@@ -1047,6 +1062,7 @@ class XenData:
             rgba[..., 3] = np.clip(signal * splat_alpha, 0, 1)
             ax.images[-1].set_data(rgba)
 
+        _save_figure(ax, save=save, save_kwargs=save_kwargs)
         if return_array in (False, None):
             return ax
         if return_array is True or return_array == "display":
@@ -1083,6 +1099,8 @@ class XenData:
         legend_title: Optional[str] = None,
         background: str = 'black',
         show_axis: bool = False,
+        save=None,
+        save_kwargs: Optional[dict] = None,
     ):
         """
         Overlay cell or nucleus boundary polygons on an axes.
@@ -1171,6 +1189,8 @@ class XenData:
             legend_title=legend_title,
             background=background,
             show_axis=show_axis,
+            save=save,
+            save_kwargs=save_kwargs,
         )
 
     def plot_cells(
@@ -1198,6 +1218,8 @@ class XenData:
         legend_title: Optional[str] = None,
         background: str = 'black',
         show_axis: bool = False,
+        save=None,
+        save_kwargs: Optional[dict] = None,
     ):
         """
         Plot cell boundary polygons.
@@ -1231,6 +1253,8 @@ class XenData:
             legend_title=legend_title,
             background=background,
             show_axis=show_axis,
+            save=save,
+            save_kwargs=save_kwargs,
         )
 
     def points(
@@ -1262,6 +1286,8 @@ class XenData:
         rasterized: bool = True,
         warn_on_sample: bool = True,
         assigned_only: Optional[bool] = None,
+        save=None,
+        save_kwargs: Optional[dict] = None,
         return_data: bool = False,
     ):
         """
@@ -1299,6 +1325,8 @@ class XenData:
             rasterized=rasterized,
             warn_on_sample=warn_on_sample,
             assigned_only=assigned_only,
+            save=save,
+            save_kwargs=save_kwargs,
             return_data=return_data,
         )
 
@@ -1371,6 +1399,8 @@ class XenData:
         background: str = "black",
         show_axis: bool = False,
         title: Optional[str] = None,
+        save=None,
+        save_kwargs: Optional[dict] = None,
     ):
         """
         Render a composite spatial view from image, transcript, and cell layers.
@@ -1426,6 +1456,10 @@ class XenData:
             Whether to show axis ticks and labels. Default ``False``.
         title : str or None
             Optional axes title.
+        save : str, path-like, or None
+            Optional path to save the rendered figure.
+        save_kwargs : dict or None
+            Optional keyword arguments forwarded to ``Figure.savefig``.
 
         Returns
         -------
@@ -1459,6 +1493,8 @@ class XenData:
             background=background,
             show_axis=show_axis,
             title=title,
+            save=save,
+            save_kwargs=save_kwargs,
         )
 
     def create_binned_adata(self, 
