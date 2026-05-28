@@ -27,6 +27,7 @@ Contents
    analysis
    plotting
    rendering
+   gene_sets
    lazy_transcripts
    api
 

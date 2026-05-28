@@ -132,6 +132,14 @@ except ImportError:
     _io_namespace = _load_local_module("_xentools_io", os.path.join("io", "__init__.py"))
 
 try:
+    from . import gene_sets as _gene_sets_namespace
+except ImportError:
+    _gene_sets_namespace = _load_local_module(
+        "_xentools_gene_sets",
+        os.path.join("gene_sets", "__init__.py"),
+    )
+
+try:
     from . import utils as _utils_namespace
 except ImportError:
     _utils_namespace = _load_local_module("_xentools_utils", os.path.join("utils", "__init__.py"))
@@ -158,6 +166,7 @@ splat = _pl_namespace.splat
 pl = _pl_namespace
 analysis = _analysis_namespace
 io = _io_namespace
+gene_sets = _gene_sets_namespace
 utils = _utils_namespace
 _make_gene_panel_df = _io_namespace.read._make_gene_panel_df
 read_xen_panel = _io_namespace.read.read_xen_panel
@@ -169,6 +178,7 @@ um_to_pixels = _utils_namespace.um_to_pixels
 __all__ = [
     "io",
     "analysis",
+    "gene_sets",
     "XenData",
     "LazyTranscripts",
     "LazyBoundaryGeoDataFrame",

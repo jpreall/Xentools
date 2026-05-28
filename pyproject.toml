@@ -22,6 +22,7 @@ dependencies = [
     "imagecodecs",
     "scikit-learn",
     "pyarrow",
+    "h5py",
 ]
 
 [project.optional-dependencies]
@@ -43,8 +44,14 @@ packages = [
     "xentools.io",
     "xentools.io.read",
     "xentools.io.write",
+    "xentools.gene_sets",
     "xentools.pl",
     "xentools.utils",
+]
+
+[tool.setuptools.package-data]
+xentools = [
+    "files/gene_lists/*.h5",
 ]
 
 [tool.pytest.ini_options]

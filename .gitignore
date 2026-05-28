@@ -7,12 +7,16 @@ __pycache__/
 .vscode/
 .claude/
 
-files/
+files/*
+!files/gene_lists/
+files/gene_lists/*
+!files/gene_lists/xentools_curated_gene_sets.h5
 EXPLORER_EXPORT_PLAN.md
 TRANSCRIPTS_ZARR_COMPARISON.md
 
 dist/
 build/
+docs/_build/
 *.egg-info/
 
 .pytest_cache/

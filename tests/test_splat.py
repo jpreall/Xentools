@@ -128,3 +128,17 @@ def test_splat_rejects_unknown_return_array_mode(xdata):
             show_legend=False,
             return_array="both",
         )
+
+
+def test_splat_rejects_more_than_three_channels(xdata):
+    genes = _test_genes(xdata, n=4)
+    gene_sets = {f"set_{i}": [gene] for i, gene in enumerate(genes)}
+
+    with pytest.raises(ValueError, match="at most 3"):
+        xdata.splat(
+            gene_sets,
+            bounds=_coarse_bounds(xdata),
+            pixel_size_um=100,
+            sigma_um=1,
+            show_legend=False,
+        )

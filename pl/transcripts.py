@@ -905,6 +905,12 @@ def splat(
         chan_names = list(genes)
 
     n_channels = len(chan_names)
+    if n_channels > 3:
+        raise ValueError(
+            "plot_splat can display at most 3 gene or gene-set channels as RGB. "
+            f"You passed {n_channels}. Select up to 3 entries for splat plotting, "
+            "or pass the full dictionary to a summary plot such as scanpy.pl.dotplot."
+        )
     if np.isscalar(gains):
         gains = (float(gains),) * n_channels
     else:

@@ -28,6 +28,19 @@ Top-Level API
    xentools.neighborhood_composition
    xentools.normalize_tp10k
 
+Gene Sets Namespace
+-------------------
+
+.. autosummary::
+
+   xentools.gene_sets.pick
+   xentools.gene_sets.GeneSetPicker
+   xentools.gene_sets.build_gene_set_h5
+   xentools.gene_sets.load_curated_gene_sets
+   xentools.gene_sets.prepare_for_xendata
+   xentools.gene_sets.convert_gene_sets_species
+   xentools.gene_sets.coverage_summary
+
 XenData
 -------
 

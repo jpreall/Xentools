@@ -1,6 +1,7 @@
 import sys
 
 from . import analysis
+from . import gene_sets
 from . import io
 from . import pl
 from . import utils
@@ -55,6 +56,7 @@ from .xentools import (
 __all__ = [
     'io', 
     'analysis',
+    'gene_sets',
     'pl',
     'utils',
     'write_xenium_gene_groups',
@@ -97,4 +99,4 @@ __all__ = [
     'evaluate_niche_k_values',
     'normalize_tp10k',
     ]
-sys.modules.update({f"{__name__}.{m}": globals()[m] for m in ["analysis", "io", "pl", "utils"]})
+sys.modules.update({f"{__name__}.{m}": globals()[m] for m in ["analysis", "gene_sets", "io", "pl", "utils"]})
