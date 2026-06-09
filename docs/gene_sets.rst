@@ -6,7 +6,7 @@ selecting signatures against a reference ``XenData`` object.
 
 The intended workflow is:
 
-1. Launch a picker with ``xentools.gene_sets.pick(xdata)``.
+1. Launch a picker with ``xdata.gene_set_picker()``.
 2. Select gene sets interactively, or with ``search()`` and ``add()``.
 3. Use ``picker.gene_sets`` directly in plotting or Scanpy functions.
 
@@ -17,8 +17,18 @@ Basic Workflow
 
    import xentools
 
-   picker = xentools.gene_sets.pick(xdata)
-   picker.show()
+   xdata = xentools.XenData("/path/to/xenium/outs")
+   picker = xdata.gene_set_picker()
+   picker
+
+In a Jupyter notebook, evaluating ``picker`` as the final expression in a cell
+opens the interactive picker widget. Calling ``picker.show()`` is equivalent
+and can be useful when the picker is not the final expression.
+
+``xdata.gene_set_picker()`` is the preferred method-style spelling. The class is
+named ``GeneSetPicker``, and ``xdata.GeneSetPicker()`` is available as a
+discoverable alias, but Xentools follows Python's usual snake_case convention
+for instance methods.
 
 After selecting gene sets:
 
@@ -55,7 +65,7 @@ If widgets are unavailable, the picker still works programmatically:
 
 .. code-block:: python
 
-   picker = xentools.gene_sets.pick(xdata)
+   picker = xdata.gene_set_picker()
 
    picker.search("hypoxia")
    picker.add("MSigDB_Hallmark_2020", "Hypoxia")
@@ -152,6 +162,10 @@ Then point the picker to the custom archive:
        xdata,
        path="/path/to/my_gene_sets.h5",
    )
+
+The module-level ``xentools.gene_sets.pick(xdata, ...)`` function is equivalent
+to ``xdata.gene_set_picker(...)`` and remains useful when writing code that
+does not assume a method on the object.
 
 API Summary
 -----------

@@ -142,3 +142,88 @@ def test_splat_rejects_more_than_three_channels(xdata):
             sigma_um=1,
             show_legend=False,
         )
+
+
+class _FakeLazyTranscripts:
+    def __init__(self):
+        self._gene_names = ["g1", "g2", "g3", "g4"]
+        self._tile_meta = {"0,0": {"n": 4}}
+        self.seen_channel_gene_lists = None
+        self.seen_quality = None
+
+    @property
+    def frame(self):
+        return np.array([[0.0, 10.0], [0.0, 10.0]])
+
+    def query(self, *args, **kwargs):
+        raise AssertionError("lazy splat fast path should avoid query()")
+
+    def rasterize_channels(self, channel_gene_lists, bounds, pixel_size_um=1.0, quality="high"):
+        self.seen_channel_gene_lists = channel_gene_lists
+        self.seen_quality = quality
+        return np.ones((10, 10, len(channel_gene_lists)), dtype=np.float32)
+
+
+def test_splat_uses_lazy_rasterize_fast_path():
+    import xentools
+
+    lazy = _FakeLazyTranscripts()
+    raw = xentools.pl.splat(
+        lazy,
+        genes={"R": ["g1", "g2"], "G": ["g3"], "B": ["g4"]},
+        bounds=(0, 10, 0, 10),
+        pixel_size_um=1,
+        sigma_um=0,
+        smooth=False,
+        show_legend=False,
+        return_array="raw",
+        quality="all",
+    )
+
+    assert raw.shape == (10, 10, 3)
+    assert lazy.seen_channel_gene_lists == [["g1", "g2"], ["g3"], ["g4"]]
+    assert lazy.seen_quality == "all"
+
+
+def test_splat_clips_large_gene_signatures_with_warning():
+    import xentools
+
+    lazy = _FakeLazyTranscripts()
+    genes = {"R": ["g1", "g2", "g3"], "G": ["g4"]}
+
+    with pytest.warns(RuntimeWarning, match="clipped large gene signatures"):
+        xentools.pl.splat(
+            lazy,
+            genes=genes,
+            bounds=(0, 10, 0, 10),
+            pixel_size_um=1,
+            sigma_um=0,
+            smooth=False,
+            show_legend=False,
+            return_array="raw",
+            max_signature_genes=2,
+        )
+
+    assert lazy.seen_channel_gene_lists == [["g1", "g2"], ["g4"]]
+
+
+def test_splat_force_all_genes_disables_signature_clip():
+    import xentools
+
+    lazy = _FakeLazyTranscripts()
+    genes = {"R": ["g1", "g2", "g3"], "G": ["g4"]}
+
+    xentools.pl.splat(
+        lazy,
+        genes=genes,
+        bounds=(0, 10, 0, 10),
+        pixel_size_um=1,
+        sigma_um=0,
+        smooth=False,
+        show_legend=False,
+        return_array="raw",
+        max_signature_genes=2,
+        force_all_genes=True,
+    )
+
+    assert lazy.seen_channel_gene_lists == [["g1", "g2", "g3"], ["g4"]]

@@ -47,6 +47,26 @@ def test_cell_feature_matrix_excludes_total_transcripts_feature(xdata):
     assert "total_transcripts" in xdata.adata.obs.columns
 
 
+def test_cell_feature_matrix_populates_raw_count_metrics(xdata):
+    counts = xdata.adata.layers["counts"] if "counts" in xdata.adata.layers else xdata.adata.X
+
+    if "counts" in xdata.adata.layers:
+        np.testing.assert_array_equal(xdata.adata.X.toarray(), xdata.adata.layers["counts"].toarray())
+
+    np.testing.assert_array_equal(
+        xdata.adata.obs["n_transcripts"].to_numpy(),
+        np.asarray(counts.sum(axis=1)).ravel().astype(np.int64),
+    )
+    np.testing.assert_array_equal(
+        xdata.adata.var["total_counts"].to_numpy(),
+        np.asarray(counts.sum(axis=0)).ravel().astype(np.int64),
+    )
+    np.testing.assert_array_equal(
+        xdata.adata.var["n_cells"].to_numpy(),
+        np.asarray((counts > 0).sum(axis=0)).ravel().astype(np.int64),
+    )
+
+
 def test_read_zarr_adata_supports_legacy_flat_cell_feature_matrix(tmp_path):
     import warnings
 
@@ -120,4 +140,7 @@ def test_read_zarr_adata_supports_legacy_flat_cell_feature_matrix(tmp_path):
     assert adata.var_names.tolist() == ["GeneA", "GeneB"]
     np.testing.assert_array_equal(adata.X.toarray(), np.array([[1, 0], [0, 3]]))
     np.testing.assert_array_equal(adata.obs["total_transcripts"].to_numpy(), np.array([5, 7]))
+    np.testing.assert_array_equal(adata.obs["n_transcripts"].to_numpy(), np.array([1, 3]))
+    np.testing.assert_array_equal(adata.var["total_counts"].to_numpy(), np.array([1, 3]))
+    np.testing.assert_array_equal(adata.var["n_cells"].to_numpy(), np.array([1, 1]))
     np.testing.assert_allclose(adata.obsm["spatial"], np.array([[10.0, 20.0], [40.0, 50.0]], dtype=np.float32))

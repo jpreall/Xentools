@@ -103,6 +103,37 @@ the listed genes are summed into that channel.
        }
    )
 
+For zarr-backed lazy transcripts, ``plot_splat`` uses a direct zarr-to-raster
+path so it does not need to build an intermediate transcript DataFrame. This is
+especially useful for Atera-scale datasets and ROI-focused plotting.
+
+Large gene signatures can still be expensive because each additional gene adds
+more zarr slices to read. To keep interactive plotting responsive, splats clip
+each gene-set channel to the first 50 genes by default and issue a warning when
+this happens. If you intentionally want every gene in a large signature, opt in
+explicitly:
+
+.. code-block:: python
+
+   ax = xdata.plot_splat(
+       genes=large_signature_dict,
+       force_all_genes=True,
+   )
+
+You can also change or disable the cap:
+
+.. code-block:: python
+
+   ax = xdata.plot_splat(
+       genes=large_signature_dict,
+       max_signature_genes=100,
+   )
+
+   ax = xdata.plot_splat(
+       genes=large_signature_dict,
+       max_signature_genes=None,
+   )
+
 By default, ``splat`` returns a matplotlib axes object. Use ``return_array`` to
 return image arrays for downstream processing:
 

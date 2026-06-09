@@ -67,6 +67,7 @@ try:
     from ..utils.geometry import frame
     from ..pl._save import save_figure as _save_figure
     from .. import pl as _pl_namespace
+    from .. import gene_sets as _gene_sets_namespace
 except ImportError:
     _binning_mod = _load_local_module(
         "_xentools_analysis_binning_for_xendata",
@@ -99,6 +100,10 @@ except ImportError:
     _pl_namespace = _load_local_module(
         "_xentools_pl_for_xendata",
         os.path.join("..", "pl", "__init__.py"),
+    )
+    _gene_sets_namespace = _load_local_module(
+        "_xentools_gene_sets_for_xendata",
+        os.path.join("..", "gene_sets", "__init__.py"),
     )
     _save_mod = _load_local_module(
         "_xentools_pl_save_for_xendata",
@@ -1265,7 +1270,7 @@ class XenData:
         quality: str = "all",
         max_points: Optional[int] = 100_000,
         random_state: Optional[int] = 0,
-        color: str = "white",
+        color: Optional[str] = None,
         palette: Optional[dict] = None,
         cmap: str = "tab20",
         marker: str = "o",
@@ -1371,6 +1376,24 @@ class XenData:
         """
         return _neighborhood_composition(self, **kwargs)
 
+    def gene_set_picker(self, **kwargs):
+        """
+        Create a gene-set picker tied to this XenData object.
+
+        This is the recommended method-style spelling. ``GeneSetPicker`` is the
+        class name; Python method names are conventionally snake_case.
+        """
+        return _gene_sets_namespace.pick(self, **kwargs)
+
+    def GeneSetPicker(self, **kwargs):
+        """
+        Alias for ``gene_set_picker()``.
+
+        Kept for discoverability when users think in terms of the picker class
+        name, but ``gene_set_picker`` is the preferred style.
+        """
+        return self.gene_set_picker(**kwargs)
+
     def niche_heatmap(self, **kwargs):
         """
         Plot mean neighborhood-composition features by niche label.
@@ -1399,6 +1422,10 @@ class XenData:
         background: str = "black",
         show_axis: bool = False,
         title: Optional[str] = None,
+        legend=True,
+        legend_loc: str = "outside right",
+        legend_title: Optional[str] = None,
+        legend_max_items: int = 30,
         save=None,
         save_kwargs: Optional[dict] = None,
     ):
@@ -1456,6 +1483,17 @@ class XenData:
             Whether to show axis ticks and labels. Default ``False``.
         title : str or None
             Optional axes title.
+        legend : bool or str
+            Whether to draw one combined legend for the rendered layers.
+            Default ``True``. Use ``False`` or ``"off"`` to disable it.
+        legend_loc : str
+            Combined legend placement. Supports ``"outside right"``,
+            ``"outside left"``, ``"outside bottom"``, ``"outside top"``, or
+            any Matplotlib legend location.
+        legend_title : str or None
+            Optional title for the combined legend.
+        legend_max_items : int
+            Maximum number of entries shown per categorical legend section.
         save : str, path-like, or None
             Optional path to save the rendered figure.
         save_kwargs : dict or None
@@ -1493,6 +1531,10 @@ class XenData:
             background=background,
             show_axis=show_axis,
             title=title,
+            legend=legend,
+            legend_loc=legend_loc,
+            legend_title=legend_title,
+            legend_max_items=legend_max_items,
             save=save,
             save_kwargs=save_kwargs,
         )

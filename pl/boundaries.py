@@ -190,6 +190,15 @@ def plot_boundaries(
         gdf = gdf.sample(max_cells, random_state=0)
 
     adata = getattr(xdata, "adata", None)
+    if color_by is not None and (adata is None or color_by not in adata.obs.columns):
+        available = [] if adata is None else list(adata.obs.columns)
+        preview = ", ".join(map(str, available[:10]))
+        suffix = "" if len(available) <= 10 else ", ..."
+        raise ValueError(
+            f"color_by={color_by!r} was not found in xdata.adata.obs. "
+            f"Available obs columns: [{preview}{suffix}]"
+        )
+
     expression_label = None
     expression_norm = None
     expression_cmap = None

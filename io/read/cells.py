@@ -37,11 +37,16 @@ except ImportError:
 
 try:
     from ...analysis.normalization import normalize_tp10k
+    from ...utils.metadata import _annotate_adata_count_metrics
 except ImportError:
     normalize_tp10k = _load_local_module(
         "_xentools_analysis_normalization_for_cells",
         os.path.join("..", "..", "analysis", "normalization.py"),
     ).normalize_tp10k
+    _annotate_adata_count_metrics = _load_local_module(
+        "_xentools_utils_metadata_for_cells",
+        os.path.join("..", "..", "utils", "metadata.py"),
+    )._annotate_adata_count_metrics
 
 
 __all__ = [
@@ -184,13 +189,12 @@ def read_xenium_to_anndata(xenium_output_folder, include_non_gene_features=False
     adata.uns["genome"] = species
 
     adata.layers["counts"] = adata.X.astype("int").copy()
+    _annotate_adata_count_metrics(adata, counts=adata.layers["counts"])
     adata.layers["TP10K"] = normalize_tp10k(adata.layers["counts"], log1p=True).astype("float32")
-    adata.X = adata.layers["TP10K"].copy()
 
-    adata.obs["n_counts"] = adata.X.sum(1).A1.astype("int")
-    adata.var["total_counts"] = adata.X.sum(0).A1.astype("int")
-    adata.obs["n_genes"] = np.sum(adata.X > 0, axis=1).A1.astype("int")
-    adata.obs["logUMIs"] = np.log(adata.obs["n_counts"] + 1)
+    adata.obs["n_counts"] = adata.obs["n_transcripts"].astype("int")
+    adata.obs["n_genes"] = np.sum(adata.layers["counts"] > 0, axis=1).A1.astype("int")
+    adata.obs["logUMIs"] = np.log(adata.obs["n_transcripts"] + 1)
 
     clusters = _read_all_classic_cluster_annotations(xdir, adata.obs_names, verbose=verbose)
     adata.obs = adata.obs.merge(clusters, left_index=True, right_index=True, how="left")

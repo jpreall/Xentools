@@ -15,6 +15,7 @@ dependencies = [
     "geopandas",
     "shapely",
     "zarr>=2.18.3",
+    "numcodecs",
     "dask",
     "xarray",
     "Pillow",
@@ -23,6 +24,8 @@ dependencies = [
     "scikit-learn",
     "pyarrow",
     "h5py",
+    "ipython",
+    "ipywidgets",
 ]
 
 [project.optional-dependencies]

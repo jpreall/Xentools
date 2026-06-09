@@ -660,6 +660,128 @@ class LazyTranscripts:
 
         return result
 
+    def rasterize_channels(
+        self,
+        channel_gene_lists,
+        bounds,
+        pixel_size_um=1.0,
+        quality: str = "high",
+    ):
+        """
+        Bin zarr-backed transcripts directly into display channels.
+
+        This is a plotting-oriented fast path for transcript splats. It avoids
+        building an intermediate DataFrame and never materializes string gene
+        names. ``channel_gene_lists`` is a sequence where each item is the gene
+        list assigned to that output channel.
+        """
+        import zarr
+
+        xmin, xmax, ymin, ymax = map(float, bounds)
+        nx = int(np.ceil((xmax - xmin) / float(pixel_size_um)))
+        ny = int(np.ceil((ymax - ymin) / float(pixel_size_um)))
+        if nx <= 0 or ny <= 0:
+            raise ValueError("bounds must define a positive-width and positive-height region.")
+
+        n_channels = len(channel_gene_lists)
+        rgb = np.zeros((ny, nx, n_channels), dtype=np.float32)
+        if n_channels == 0:
+            return rgb
+
+        tile_keys = self._candidate_tiles(xmin, xmax, ymin, ymax)
+        q_slices = self._quality_slices(quality)
+
+        gene_channel = np.full(len(self._gene_names), -1, dtype=np.int16)
+        all_genes = False
+        for channel_idx, genes in enumerate(channel_gene_lists):
+            if genes is None:
+                all_genes = True
+                gene_channel[:] = channel_idx
+                break
+            for gene in genes:
+                gid = self._gene_index.get(gene)
+                if gid is not None:
+                    gene_channel[gid] = channel_idx
+
+        if not all_genes and not np.any(gene_channel >= 0):
+            return rgb
+
+        selected_gene_ids = np.flatnonzero(gene_channel >= 0)
+        store = zarr.storage.ZipStore(self._path, mode="r")
+        try:
+            grp = _open_zarr_group_compat(zarr, store, mode="r", force_v2=True)
+            for tile_key in tile_keys:
+                prefix = f"grids/0/{tile_key}"
+                try:
+                    loc_arr = grp[f"{prefix}/location"]
+                    gid_arr = grp[f"{prefix}/gene_identity"]
+                except Exception:
+                    continue
+
+                if all_genes:
+                    ranges = [(0, int(self._tile_meta.get(tile_key, {}).get("n", 0)))]
+                else:
+                    try:
+                        offsets = grp[f"{prefix}/gene_offset"][:]
+                    except Exception:
+                        continue
+                    ranges = []
+                    for gid in selected_gene_ids:
+                        if gid >= len(offsets):
+                            continue
+                        for sc, ec in q_slices:
+                            s, e = int(offsets[gid, sc]), int(offsets[gid, ec])
+                            if e > s:
+                                ranges.append((s, e))
+
+                if not ranges:
+                    continue
+
+                ranges.sort()
+                merged = [list(ranges[0])]
+                for s, e in ranges[1:]:
+                    if s <= merged[-1][1]:
+                        merged[-1][1] = max(merged[-1][1], e)
+                    else:
+                        merged.append([s, e])
+
+                for s, e in merged:
+                    if e <= s:
+                        continue
+                    locs = loc_arr[s:e]
+                    gids = gid_arr[s:e, 0].astype(np.int64, copy=False)
+                    valid_gene = gids < len(gene_channel)
+                    channels = np.full(len(gids), -1, dtype=np.int16)
+                    channels[valid_gene] = gene_channel[gids[valid_gene]]
+                    mask = (
+                        (channels >= 0)
+                        & (locs[:, 0] >= xmin)
+                        & (locs[:, 0] <= xmax)
+                        & (locs[:, 1] >= ymin)
+                        & (locs[:, 1] <= ymax)
+                    )
+                    if not mask.any():
+                        continue
+
+                    x_idx = ((locs[mask, 0] - xmin) / pixel_size_um).astype(np.int32)
+                    y_idx = ((ymax - locs[mask, 1]) / pixel_size_um).astype(np.int32)
+                    ch = channels[mask].astype(np.int32, copy=False)
+                    valid_px = (x_idx >= 0) & (x_idx < nx) & (y_idx >= 0) & (y_idx < ny)
+                    if not valid_px.any():
+                        continue
+
+                    flat = (
+                        ch[valid_px].astype(np.int64) * (ny * nx)
+                        + y_idx[valid_px].astype(np.int64) * nx
+                        + x_idx[valid_px].astype(np.int64)
+                    )
+                    counts = np.bincount(flat, minlength=n_channels * ny * nx)
+                    rgb += counts.reshape(n_channels, ny, nx).transpose(1, 2, 0)
+        finally:
+            store.close()
+
+        return rgb
+
     def _load_tile(self, grp, tile_key, xmin, xmax, ymin, ymax, gene_ids, quality, include_z=False):
         prefix = f"grids/0/{tile_key}"
         try:

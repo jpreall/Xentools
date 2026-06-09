@@ -169,3 +169,11 @@ def test_plot_cells_can_color_by_obs_annotation(xdata):
     assert isinstance(ax, matplotlib.axes.Axes)
     assert len(ax.collections) == 1
     assert ax.get_legend() is not None
+
+
+def test_plot_cells_missing_color_by_raises_clear_error(xdata):
+    with pytest.raises(ValueError, match="color_by='NotAColumn'.*xdata.adata.obs"):
+        xdata.plot_cells(
+            color_by="NotAColumn",
+            bounds=_boundary_bounds(xdata, pad=100),
+        )

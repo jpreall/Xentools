@@ -7,9 +7,13 @@ anndata
 geopandas
 shapely
 zarr>=2.18.3
+numcodecs
 dask
 xarray
 pillow
 tifffile
 imagecodecs
 scikit-learn
+h5py
+ipython
+ipywidgets

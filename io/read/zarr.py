@@ -27,12 +27,14 @@ def _load_local_module(module_name, relative_path):
 
 
 try:
-    from ...utils.metadata import _encode_xenium_cell_ids
+    from ...utils.metadata import _annotate_adata_count_metrics, _encode_xenium_cell_ids
 except ImportError:
-    _encode_xenium_cell_ids = _load_local_module(
+    _metadata_mod = _load_local_module(
         "_xentools_utils_metadata",
         os.path.join("..", "..", "utils", "metadata.py"),
-    )._encode_xenium_cell_ids
+    )
+    _annotate_adata_count_metrics = _metadata_mod._annotate_adata_count_metrics
+    _encode_xenium_cell_ids = _metadata_mod._encode_xenium_cell_ids
 
 __all__ = [
     "_open_zarr_group_compat",
@@ -221,6 +223,7 @@ def _read_zarr_adata(folder, verbose=True, include_non_gene_features=False):
             print(f"  Filtered cell feature matrix to {kept:,} gene feature(s); removed {removed:,} non-gene/aggregate feature(s).")
 
     adata = ad.AnnData(X=X, obs=obs, var=var)
+    _annotate_adata_count_metrics(adata)
     adata.obsm["spatial"] = summary_aligned[:, :2].astype(np.float32)
 
     return adata

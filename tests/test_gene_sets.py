@@ -25,6 +25,24 @@ def test_picker_search_add_and_filter_to_xendata(xdata):
     picker.close()
 
 
+def test_xendata_gene_set_picker_methods(xdata):
+    import xentools
+
+    picker = xdata.gene_set_picker()
+    try:
+        assert isinstance(picker, xentools.gene_sets.GeneSetPicker)
+        assert picker.xdata is xdata
+    finally:
+        picker.close()
+
+    alias = xdata.GeneSetPicker()
+    try:
+        assert isinstance(alias, xentools.gene_sets.GeneSetPicker)
+        assert alias.xdata is xdata
+    finally:
+        alias.close()
+
+
 def test_picker_mouse_library_matches_dataset_symbol_case(xdata):
     import xentools
 
@@ -76,6 +94,34 @@ def test_picker_widget_defaults_to_hallmark_when_available(xdata):
 
     db_dropdown = picker._widget.children[0].children[0]
     assert db_dropdown.value == "MSigDB_Hallmark_2020"
+    picker.close()
+
+
+def test_picker_widget_splat_preview_has_force_all_genes_toggle(xdata):
+    import xentools
+
+    picker = xentools.gene_sets.pick(xdata)
+    picker.show()
+
+    toggle = picker._widget_state["force_all_genes"]
+    assert toggle.value is False
+    assert toggle.description == "Use all genes"
+    picker.close()
+
+
+def test_picker_ipython_display_delegates_to_show(xdata, monkeypatch):
+    import xentools
+
+    picker = xentools.gene_sets.pick(xdata)
+    calls = []
+
+    def fake_show():
+        calls.append("show")
+
+    monkeypatch.setattr(picker, "show", fake_show)
+    picker._ipython_display_()
+
+    assert calls == ["show"]
     picker.close()
 
 

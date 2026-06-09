@@ -235,6 +235,13 @@ class GeneSetPicker:
         selected_label = widgets.HTML(value="<b>Selected gene sets</b>")
         splat_status = widgets.HTML()
         splat_output = widgets.Output()
+        force_all_genes = widgets.Checkbox(
+            value=False,
+            description="Use all genes",
+            indent=False,
+            tooltip="Disable plot_splat's large-signature clipping for preview.",
+            layout=widgets.Layout(width="120px"),
+        )
         splat_button = widgets.Button(
             description="Preview splat",
             button_style="info",
@@ -290,7 +297,10 @@ class GeneSetPicker:
                     from IPython.display import display
                     import matplotlib.pyplot as plt
 
-                    ax = self.xdata.plot_splat(genes=self._gene_sets)
+                    ax = self.xdata.plot_splat(
+                        genes=self._gene_sets,
+                        force_all_genes=bool(force_all_genes.value),
+                    )
                     display(ax.figure)
                     plt.close(ax.figure)
                 splat_status.value = "<span style='color:#5a8;'>Splat preview rendered.</span>"
@@ -314,12 +324,13 @@ class GeneSetPicker:
             "splat_button": splat_button,
             "splat_status": splat_status,
             "splat_output": splat_output,
+            "force_all_genes": force_all_genes,
         }
         controls = widgets.VBox([db_dropdown, search_box, match_label])
         buttons = widgets.VBox([add_button, remove_button, clear_button])
         selected_panel = widgets.VBox([selected_label, selected])
         panels = widgets.HBox([results, buttons, selected_panel])
-        plot_controls = widgets.HBox([splat_button, splat_status])
+        plot_controls = widgets.HBox([splat_button, force_all_genes, splat_status])
         self._widget = widgets.VBox([controls, panels, status, plot_controls, splat_output])
         refresh_results()
         self._refresh_widget_selection()
@@ -399,6 +410,16 @@ class GeneSetPicker:
             )
         else:
             status.value = "".join(chips)
+
+    def _ipython_display_(self):
+        """
+        Display the interactive picker when evaluated in an IPython notebook.
+
+        ``__repr__`` intentionally remains side-effect free for logs, terminals,
+        and debugging. IPython calls this rich-display hook when the picker is
+        the final expression in a notebook cell.
+        """
+        self.show()
 
     def __repr__(self):
         return (

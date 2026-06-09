@@ -61,6 +61,65 @@ def _normalize_genes_for_query(genes):
     return list(genes)
 
 
+def _normalize_splat_channels(
+    genes,
+    *,
+    max_signature_genes=50,
+    force_all_genes=False,
+    warn_on_signature_clip=True,
+):
+    """
+    Return channel names, optional gene-set mapping, and per-channel gene lists.
+    """
+    gene_signatures = None
+    clipped = {}
+
+    def _clip_gene_list(name, gene_list):
+        if gene_list is None:
+            return None
+        gene_list = list(gene_list)
+        if (
+            max_signature_genes is not None
+            and not force_all_genes
+            and len(gene_list) > int(max_signature_genes)
+        ):
+            clipped[name] = (len(gene_list), int(max_signature_genes))
+            return gene_list[: int(max_signature_genes)]
+        return gene_list
+
+    if genes is None:
+        chan_names = ["All transcripts"]
+        channel_gene_lists = [None]
+    elif isinstance(genes, dict):
+        chan_names = list(genes.keys())
+        gene_signatures = {
+            name: _clip_gene_list(name, genes[name])
+            for name in chan_names
+        }
+        channel_gene_lists = [gene_signatures[name] for name in chan_names]
+    elif isinstance(genes, str):
+        chan_names = [genes]
+        channel_gene_lists = [[genes]]
+    else:
+        chan_names = list(genes)
+        channel_gene_lists = [[gene] for gene in chan_names]
+
+    if clipped and warn_on_signature_clip:
+        parts = [
+            f"{name!r}: {original:,}->{kept:,}"
+            for name, (original, kept) in clipped.items()
+        ]
+        warnings.warn(
+            "plot_splat clipped large gene signatures for faster rendering "
+            f"({'; '.join(parts)} genes). Pass force_all_genes=True or "
+            "max_signature_genes=None to use every gene.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    return chan_names, gene_signatures, channel_gene_lists
+
+
 def _resolve_active_roi(data, bounds):
     if bounds is not None or not hasattr(data, "active_roi"):
         return None
@@ -230,6 +289,89 @@ def _point_groups(df, genes=None, gene_col="feature_name"):
     labels = list(dict.fromkeys(_normalize_genes_for_query(genes) or groups.dropna().tolist()))
     labels = [label for label in labels if label in set(groups)]
     return groups, labels
+
+
+def _display_splat(
+    rgb,
+    *,
+    chan_names,
+    gains,
+    xmin,
+    xmax,
+    ymin,
+    ymax,
+    sigma_px,
+    ax=None,
+    global_norm=False,
+    smooth=True,
+    show_ticks=False,
+    show_legend=True,
+    legend_loc="outside right",
+):
+    if smooth:
+        rgb = gaussian_filter(rgb, sigma=[sigma_px, sigma_px, 0], mode="nearest")
+
+    if global_norm:
+        base = rgb.copy()
+        m = base.max()
+        disp = base / m if m > 0 else base
+    else:
+        base = rgb.copy()
+        disp = np.zeros_like(base)
+        for k in range(rgb.shape[-1]):
+            m = base[..., k].max()
+            if m > 0:
+                disp[..., k] = base[..., k] / m
+
+    disp = np.clip(disp * np.array(gains, dtype=float).reshape(1, 1, -1), 0, 1)
+
+    n_channels = len(chan_names)
+    if ax is None:
+        _, ax = plt.subplots(1, 1, figsize=(12, 12) if n_channels == 3 else (6, 6))
+
+    extent = [xmin, xmax, ymin, ymax]
+    if n_channels == 1:
+        ax.imshow(disp[..., 0], extent=extent, origin="lower", interpolation="nearest", cmap="gray")
+    elif n_channels >= 3:
+        ax.imshow(disp[..., :3], extent=extent, origin="lower", interpolation="nearest")
+
+    if show_ticks:
+        ax.set_xlabel("x (µm)")
+        ax.set_ylabel("y (µm)")
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+    ax.grid(False)
+
+    channel_colors = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    if show_legend and chan_names != ["All transcripts"]:
+        if n_channels == 1:
+            legend_colors = [plt.get_cmap("gray")(0.9)[:3]]
+        else:
+            legend_colors = [
+                channel_colors[i] if i < len(channel_colors) else plt.get_cmap("hsv")(i / n_channels)[:3]
+                for i in range(n_channels)
+            ]
+
+        handles = [Patch(color=c, label=n) for c, n in zip(legend_colors, chan_names)]
+        legend_kwargs = dict(handles=handles, fontsize="medium", labelcolor="white", facecolor="black", edgecolor="black")
+        if legend_loc == "outside right":
+            ax.legend(loc="center left", bbox_to_anchor=(1, 0.5), **legend_kwargs)
+        elif legend_loc == "outside left":
+            ax.legend(loc="center right", bbox_to_anchor=(0, 0.5), **legend_kwargs)
+        elif legend_loc == "outside bottom":
+            ax.legend(loc="upper center", bbox_to_anchor=(0.5, 0), ncol=min(n_channels, 4), **legend_kwargs)
+        elif legend_loc == "outside top":
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1), ncol=min(n_channels, 4), **legend_kwargs)
+        else:
+            ax.legend(loc=legend_loc, **legend_kwargs)
+    else:
+        ax.set_title(", ".join(chan_names[:3]))
+
+    return rgb, disp, ax
 
 
 def create_bins(df, bin_size=5):
@@ -633,7 +775,7 @@ def points(
     x_col: str = "x_location",
     y_col: str = "y_location",
     gene_col: str = "feature_name",
-    color: str = "white",
+    color: Optional[str] = None,
     palette: Optional[dict] = None,
     cmap: str = "tab20",
     marker: str = "o",
@@ -666,7 +808,10 @@ def points(
     uses streaming tile reads plus random priority sampling, so large queries
     do not need to materialize every matching transcript before downsampling.
 
-    Set ``max_points=None`` to draw every matching transcript.
+    Set ``max_points=None`` to draw every matching transcript. Pass
+    ``color=...`` to draw all selected point groups in one color. When
+    ``color`` is omitted and ``genes`` is supplied, groups are colored from
+    ``palette`` or ``cmap``.
     """
     import matplotlib.colors as mcolors
 
@@ -725,7 +870,7 @@ def points(
         ax.scatter(
             df[x_col].to_numpy(),
             plot_y,
-            c=color,
+            c=color or "white",
             marker=marker,
             s=s,
             alpha=alpha,
@@ -735,8 +880,11 @@ def points(
         )
     else:
         if palette is None:
-            colors = plt.get_cmap(cmap)(np.linspace(0, 1, max(1, len(labels))))
-            palette = {label: mcolors.to_hex(colors[i]) for i, label in enumerate(labels)}
+            if color is not None:
+                palette = {label: color for label in labels}
+            else:
+                colors = plt.get_cmap(cmap)(np.linspace(0, 1, max(1, len(labels))))
+                palette = {label: mcolors.to_hex(colors[i]) for i, label in enumerate(labels)}
 
         handles = []
         group_values = groups.to_numpy()
@@ -745,7 +893,7 @@ def points(
             if not mask.any():
                 continue
             this_marker = markers.get(label, marker) if markers is not None else marker
-            this_color = palette.get(label, color)
+            this_color = palette.get(label, color or "white")
             ax.scatter(
                 df.loc[mask, x_col].to_numpy(),
                 plot_y[mask],
@@ -840,6 +988,11 @@ def splat(
     show_legend: bool = True,
     legend_loc: str = "outside right",
     return_array=False,
+    quality: str = "high",
+    max_signature_genes: Optional[int] = 50,
+    force_all_genes: bool = False,
+    warn_on_signature_clip: bool = True,
+    use_lazy_fast_path: bool = True,
     save=None,
     save_kwargs: Optional[dict] = None,
 ):
@@ -851,59 +1004,12 @@ def splat(
     ``return_array="display"`` to return the normalized display array instead,
     or ``return_array="raw"`` to return the raw binned/smoothed raster.
     """
-    if hasattr(data, "trans") and not isinstance(data, pd.DataFrame):
-        df = data.trans
-    elif isinstance(data, pd.DataFrame):
-        df = data
-    elif _is_lazy_transcripts(data):
-        df = data
-    else:
-        raise ValueError("data must be XenData, LazyTranscripts, or pd.DataFrame")
-
-    if _is_lazy_transcripts(df):
-        if genes is None:
-            query_genes = None
-        elif isinstance(genes, str):
-            query_genes = [genes]
-        elif isinstance(genes, list):
-            query_genes = genes
-        elif isinstance(genes, dict):
-            query_genes = list({g for gs in genes.values() for g in gs})
-        else:
-            query_genes = None
-
-        if bounds is not None:
-            qxmin, qxmax, qymin, qymax = bounds
-        else:
-            qxmin = qxmax = qymin = qymax = None
-
-        df = df.query(xmin=qxmin, xmax=qxmax, ymin=qymin, ymax=qymax, genes=query_genes)
-
-    x = df[x_col].to_numpy()
-    y = df[y_col].to_numpy()
-    g = df[gene_col].to_numpy()
-
-    if bounds is None:
-        xmin, xmax = x.min(), x.max()
-        ymin, ymax = y.min(), y.max()
-    else:
-        xmin, xmax, ymin, ymax = bounds
-
-    nx = int(np.ceil((xmax - xmin) / pixel_size_um))
-    ny = int(np.ceil((ymax - ymin) / pixel_size_um))
-    sigma_px = sigma_um / pixel_size_um
-    gene_signatures = None
-
-    if genes is None:
-        chan_names = ["Random transcripts"]
-    elif isinstance(genes, dict):
-        chan_names = list(genes.keys())
-        gene_signatures = genes
-    elif isinstance(genes, str):
-        chan_names = [genes]
-    else:
-        chan_names = list(genes)
-
+    chan_names, gene_signatures, channel_gene_lists = _normalize_splat_channels(
+        genes,
+        max_signature_genes=max_signature_genes,
+        force_all_genes=force_all_genes,
+        warn_on_signature_clip=warn_on_signature_clip,
+    )
     n_channels = len(chan_names)
     if n_channels > 3:
         raise ValueError(
@@ -918,17 +1024,100 @@ def splat(
         if len(gains) != n_channels:
             raise ValueError(f"gains length ({len(gains)}) must match number of channels ({n_channels})")
 
+    if hasattr(data, "trans") and not isinstance(data, pd.DataFrame):
+        df = data.trans
+    elif isinstance(data, pd.DataFrame):
+        df = data
+    elif _is_lazy_transcripts(data):
+        df = data
+    else:
+        raise ValueError("data must be XenData, LazyTranscripts, or pd.DataFrame")
+
+    if _is_lazy_transcripts(df):
+        if bounds is None:
+            frame = getattr(df, "frame", None)
+            if frame is None:
+                qxmin = qxmax = qymin = qymax = None
+            else:
+                qxmin, qxmax = map(float, frame[0])
+                qymin, qymax = map(float, frame[1])
+        else:
+            qxmin, qxmax, qymin, qymax = bounds
+            qxmin, qxmax, qymin, qymax = map(float, (qxmin, qxmax, qymin, qymax))
+
+        if use_lazy_fast_path and hasattr(df, "rasterize_channels") and None not in (qxmin, qxmax, qymin, qymax):
+            xmin, xmax, ymin, ymax = qxmin, qxmax, qymin, qymax
+            sigma_px = sigma_um / pixel_size_um
+            rgb = df.rasterize_channels(
+                channel_gene_lists,
+                bounds=(xmin, xmax, ymin, ymax),
+                pixel_size_um=pixel_size_um,
+                quality=quality,
+            )
+            rgb, disp, ax = _display_splat(
+                rgb,
+                chan_names=chan_names,
+                gains=gains,
+                xmin=xmin,
+                xmax=xmax,
+                ymin=ymin,
+                ymax=ymax,
+                sigma_px=sigma_px,
+                ax=ax,
+                global_norm=global_norm,
+                smooth=smooth,
+                show_ticks=show_ticks,
+                show_legend=show_legend,
+                legend_loc=legend_loc,
+            )
+            save_figure(ax, save=save, save_kwargs=save_kwargs)
+            if return_array in (False, None):
+                return ax
+            if return_array is True or return_array == "display":
+                return disp
+            if return_array == "raw":
+                return rgb
+            if return_array == "_all":
+                return rgb, disp, ax
+            raise ValueError("return_array must be False, True, 'display', or 'raw'.")
+
+        query_genes = (
+            None
+            if genes is None
+            else list(dict.fromkeys(g for gs in channel_gene_lists if gs is not None for g in gs))
+        )
+        df = df.query(xmin=qxmin, xmax=qxmax, ymin=qymin, ymax=qymax, genes=query_genes, quality=quality)
+
+    x = df[x_col].to_numpy()
+    y = df[y_col].to_numpy()
+    g = df[gene_col].to_numpy()
+
+    if bounds is None:
+        xmin, xmax = x.min(), x.max()
+        ymin, ymax = y.min(), y.max()
+    else:
+        xmin, xmax, ymin, ymax = bounds
+
+    nx = int(np.ceil((xmax - xmin) / pixel_size_um))
+    ny = int(np.ceil((ymax - ymin) / pixel_size_um))
+    if nx <= 0 or ny <= 0:
+        raise ValueError("bounds must define a positive-width and positive-height region.")
+    sigma_px = sigma_um / pixel_size_um
+
     rgb = np.zeros((ny, nx, n_channels), dtype=np.float32)
     codes, uniq = pd.factorize(g)
     gene_to_code = {gene: i for i, gene in enumerate(uniq)}
     chan_assignment = np.full(len(uniq), -1, dtype=np.int32)
-    for k, chan_name in enumerate(chan_names):
-        if gene_signatures is not None:
-            for gene in gene_signatures[chan_name]:
-                if gene in gene_to_code:
-                    chan_assignment[gene_to_code[gene]] = k
-        elif chan_name in gene_to_code:
-            chan_assignment[gene_to_code[chan_name]] = k
+    if genes is None:
+        chan_assignment[:] = 0
+    else:
+        for k, chan_name in enumerate(chan_names):
+            if gene_signatures is not None:
+                for gene in gene_signatures[chan_name]:
+                    if gene in gene_to_code:
+                        chan_assignment[gene_to_code[gene]] = k
+            elif chan_name in gene_to_code:
+                chan_assignment[gene_to_code[chan_name]] = k
 
     transcript_channel = chan_assignment[codes]
     x_idx_all = ((x - xmin) / pixel_size_um).astype(np.int32)
@@ -942,67 +1131,22 @@ def splat(
         flat_idx = y_idx_all[mask].astype(np.int64) * nx + x_idx_all[mask]
         rgb[..., k] = np.bincount(flat_idx, minlength=ny * nx).reshape(ny, nx).astype(np.float32)
 
-    if smooth:
-        rgb = gaussian_filter(rgb, sigma=[sigma_px, sigma_px, 0], mode="nearest")
-
-    if global_norm:
-        base = rgb.copy()
-        m = base.max()
-        disp = base / m if m > 0 else base
-    else:
-        base = rgb.copy()
-        disp = np.zeros_like(base)
-        for k in range(n_channels):
-            m = base[..., k].max()
-            if m > 0:
-                disp[..., k] = base[..., k] / m
-
-    disp = np.clip(disp * np.array(gains, dtype=float).reshape(1, 1, -1), 0, 1)
-
-    if ax is None:
-        _, ax = plt.subplots(1, 1, figsize=(12, 12) if n_channels == 3 else (6, 6))
-
-    extent = [xmin, xmax, ymin, ymax]
-    if n_channels == 1:
-        ax.imshow(disp[..., 0], extent=extent, origin="lower", interpolation="nearest", cmap="gray")
-    elif n_channels >= 3:
-        ax.imshow(disp[..., :3], extent=extent, origin="lower", interpolation="nearest")
-
-    if show_ticks:
-        ax.set_xlabel("x (µm)")
-        ax.set_ylabel("y (µm)")
-    else:
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-
-    ax.grid(False)
-
-    channel_colors = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
-    if show_legend and chan_names != ["Random transcripts"]:
-        if n_channels == 1:
-            legend_colors = [plt.get_cmap("gray")(0.9)[:3]]
-        else:
-            legend_colors = [
-                channel_colors[i] if i < len(channel_colors) else plt.get_cmap("hsv")(i / n_channels)[:3]
-                for i in range(n_channels)
-            ]
-
-        handles = [Patch(color=c, label=n) for c, n in zip(legend_colors, chan_names)]
-        legend_kwargs = dict(handles=handles, fontsize="medium", labelcolor="white", facecolor="black", edgecolor="black")
-        if legend_loc == "outside right":
-            ax.legend(loc="center left", bbox_to_anchor=(1, 0.5), **legend_kwargs)
-        elif legend_loc == "outside left":
-            ax.legend(loc="center right", bbox_to_anchor=(0, 0.5), **legend_kwargs)
-        elif legend_loc == "outside bottom":
-            ax.legend(loc="upper center", bbox_to_anchor=(0.5, 0), ncol=min(n_channels, 4), **legend_kwargs)
-        elif legend_loc == "outside top":
-            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1), ncol=min(n_channels, 4), **legend_kwargs)
-        else:
-            ax.legend(loc=legend_loc, **legend_kwargs)
-    else:
-        ax.set_title(", ".join(chan_names[:3]))
+    rgb, disp, ax = _display_splat(
+        rgb,
+        chan_names=chan_names,
+        gains=gains,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        sigma_px=sigma_px,
+        ax=ax,
+        global_norm=global_norm,
+        smooth=smooth,
+        show_ticks=show_ticks,
+        show_legend=show_legend,
+        legend_loc=legend_loc,
+    )
 
     save_figure(ax, save=save, save_kwargs=save_kwargs)
     if return_array in (False, None):

@@ -56,7 +56,7 @@ Basic Example
 API Reference
 -------------
 
-.. function:: xdata.render(*, image=None, images=None, splat=None, points=None, cells=None, bounds=None, ax=None, figsize=(8, 8), dpi=None, level=None, background="black", show_axis=False, title=None, save=None, save_kwargs=None)
+.. function:: xdata.render(*, image=None, images=None, splat=None, points=None, cells=None, bounds=None, ax=None, figsize=(8, 8), dpi=None, level=None, background="black", show_axis=False, title=None, legend=True, legend_loc="outside right", legend_title=None, legend_max_items=30, save=None, save_kwargs=None)
 
    Render a composite spatial view from common XenData layer types.
 
@@ -128,6 +128,28 @@ Parameters
 
 ``title`` : str or None, default ``None``
     Optional axes title.
+
+``legend`` : bool or str, default ``True``
+    Whether to draw a single combined legend for all rendered layers. This is
+    enabled by default because ``render`` is intended to make figure-ready
+    composites. Use ``False`` or string values such as ``"off"`` or
+    ``"none"`` to suppress it. When enabled, lower-level categorical legends
+    from ``plot_splat``, ``plot_points``, and ``plot_cells`` are suppressed so
+    the final plot has one coordinated legend.
+
+``legend_loc`` : str, default ``"outside right"``
+    Combined legend placement. Supported outside placements are
+    ``"outside right"``, ``"outside left"``, ``"outside bottom"``, and
+    ``"outside top"``. Other values are passed through to Matplotlib as normal
+    legend locations, for example ``"upper right"``.
+
+``legend_title`` : str or None, default ``None``
+    Optional title for the combined legend.
+
+``legend_max_items`` : int, default ``30``
+    Maximum number of entries shown within each categorical legend section. If
+    a section has more entries, ``render`` adds a compact ``"... N more"``
+    line.
 
 ``save`` : str, path-like, or None, default ``None``
     Optional output path. The completed composite is saved after all layers are
@@ -212,9 +234,9 @@ Splat options are passed inside the ``splat`` dictionary.
 ``splat_alpha`` : float, default ``0.8`` in ``render``
     Maximum opacity of the splat overlay when drawn over other layers.
 
-``show_legend`` : bool, default ``False`` in ``render``
-    Whether to draw the splat legend. The default is disabled in composites to
-    avoid collisions with other legends.
+``show_legend`` : bool, default disabled when ``legend=True``
+    Whether to draw the lower-level splat legend. In normal composites,
+    ``render`` disables this and represents the splat in the combined legend.
 
 Point Options
 ~~~~~~~~~~~~~
@@ -281,7 +303,41 @@ Cell options are passed inside the ``cells`` dictionary.
     Colormap for continuous cell coloring.
 
 ``show_legend`` : bool, optional
-    Whether to show a legend or colorbar for cell coloring.
+    Whether to show the lower-level categorical cell legend. In normal
+    composites, ``render`` disables this and represents categorical cell
+    colors in the combined legend. Continuous cell-expression coloring still
+    uses the lower-level colorbar.
+
+Combined Legends
+~~~~~~~~~~~~~~~~
+
+By default, ``render`` creates one outside legend that summarizes all visible
+layers:
+
+.. code-block:: python
+
+   ax = xdata.render(
+       image={"channel": "DAPI", "level": 2, "alpha": 0.35},
+       splat={"genes": ["C7", "Epcam", "Tagln"], "gains": [3, 3, 3]},
+       points={"genes": ["Prss3"], "s": 0.4, "color": "cyan"},
+       cells={"color_by": "Cluster", "face_alpha": 0.2, "edge_alpha": 0.1},
+       bounds=b,
+   )
+
+The legend is organized into sections such as ``Images``, ``Transcript
+density``, ``Transcript points``, and ``Cells: Cluster``. Image legend swatches
+show the channel color at full strength even when the plotted image is dimmed
+with ``alpha``; the goal is to identify the layer, not to reproduce the exact
+blend opacity. This avoids the common failure mode where a cell-boundary legend
+replaces a gene-density legend, or where multiple legends compete for space
+inside the plot.
+
+Move or suppress the combined legend with ``legend_loc`` and ``legend``:
+
+.. code-block:: python
+
+   ax = xdata.render(..., legend_loc="outside bottom")
+   ax = xdata.render(..., legend=False)
 
 Usage Patterns
 --------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import matplotlib.axes
+import matplotlib.colors as mcolors
 import pandas as pd
 import pytest
 
@@ -56,6 +57,23 @@ def test_xentools_pl_points_supports_gene_set_coloring(xdata):
     assert set(plotted["feature_name"]).issubset(set(genes))
     assert ax.get_legend() is not None
     assert all(len(collection.get_edgecolors()) == 0 for collection in ax.collections)
+
+
+def test_points_color_overrides_auto_palette_when_genes_are_supplied(xdata):
+    genes = _genes(xdata, n=1)
+    ax = xdata.plot_points(
+        genes=genes,
+        color="yellow",
+        bounds=_bounds(xdata),
+        max_points=20,
+        show_legend=False,
+        warn_on_sample=False,
+    )
+
+    yellow = mcolors.to_rgba("yellow", alpha=0.75)
+    facecolors = ax.collections[-1].get_facecolors()
+    assert len(facecolors) > 0
+    assert tuple(facecolors[0]) == pytest.approx(yellow)
 
 
 def test_points_defaults_to_assigned_transcripts_for_dataframe():
