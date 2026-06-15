@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 
 def test_public_plotting_namespace_is_xentools_pl():
@@ -65,6 +66,41 @@ def test_cell_feature_matrix_populates_raw_count_metrics(xdata):
         xdata.adata.var["n_cells"].to_numpy(),
         np.asarray((counts > 0).sum(axis=0)).ravel().astype(np.int64),
     )
+
+
+def test_xendata_feature_metadata_from_gene_panel(xdata):
+    assert isinstance(xdata.feature_metadata, pd.DataFrame)
+    assert xdata.feature_metadata.index.name == "feature_name"
+
+    expected_columns = {
+        "gene_id",
+        "feature_type",
+        "coverage",
+        "panel_id",
+        "panel_name",
+        "panel_version",
+        "panel_species",
+        "in_adata",
+        "n_cells",
+        "total_counts",
+    }
+    assert expected_columns.issubset(xdata.feature_metadata.columns)
+    assert set(xdata.adata.var_names).issubset(set(xdata.feature_metadata.index))
+    assert xdata.feature_metadata.loc[xdata.adata.var_names, "in_adata"].all()
+
+    for column in ["gene_id", "coverage", "panel_name"]:
+        assert column in xdata.adata.var.columns
+    np.testing.assert_array_equal(
+        xdata.feature_metadata.loc[xdata.adata.var_names, "total_counts"].to_numpy(),
+        xdata.adata.var["total_counts"].to_numpy(),
+    )
+
+
+def test_xdata_features_remains_list_like_gene_names(xdata):
+    assert isinstance(xdata.features, list)
+    assert set(xdata.features).issubset(set(xdata.adata.var_names))
+    assert "Codeword" not in "".join(xdata.features)
+    assert "ControlProbe" not in "".join(xdata.features)
 
 
 def test_read_zarr_adata_supports_legacy_flat_cell_feature_matrix(tmp_path):

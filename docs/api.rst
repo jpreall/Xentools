@@ -17,6 +17,7 @@ Top-Level API
    xentools.plot_image
    xentools.plot_points
    xentools.plot_splat
+   xentools.plot_binned_splat
    xentools.render
    xentools.points
    xentools.splat
@@ -27,6 +28,7 @@ Top-Level API
    xentools.evaluate_niche_k_values
    xentools.neighborhood_composition
    xentools.normalize_tp10k
+   xentools.gene_panel_to_dataframe
 
 Gene Sets Namespace
 -------------------
@@ -55,6 +57,7 @@ Plotting Namespace
    xentools.pl.splat
    xentools.pl.points
    xentools.pl.plot_splat
+   xentools.pl.plot_binned_splat
    xentools.pl.plot_points
    xentools.pl.plot_image
    xentools.pl.render

@@ -142,6 +142,39 @@ return image arrays for downstream processing:
    display = xdata.plot_splat(["EPCAM"], return_array=True)
    raw = xdata.plot_splat(["EPCAM"], return_array="raw")
 
+Binned Splats
+-------------
+
+``plot_binned_splat`` draws the same kind of RGB gene or gene-set density image
+from a precomputed ``xdata.binned_adata`` matrix. This is useful when repeatedly
+plotting large tissue regions because the expensive transcript-to-bin
+aggregation is done once.
+
+.. code-block:: python
+
+   xdata.create_binned_adata(bin_size=5)
+
+   ax = xdata.plot_binned_splat(
+       genes={
+           "R": ["EPCAM", "KRT19"],
+           "G": ["COL1A1", "DCN"],
+           "B": ["PTPRC", "CD3D"],
+       },
+       gains=(1.0, 1.5, 2.0),
+   )
+
+Like ``plot_splat``, it accepts ``ax`` for manual compositing and
+``return_array=True`` or ``return_array="raw"`` for array output. It can also be
+used directly in the high-level compositor:
+
+.. code-block:: python
+
+   ax = xdata.render(
+       image={"channel": "DAPI", "level": 2, "alpha": 0.4},
+       binned_splat={"genes": ["EPCAM", "COL1A1", "PTPRC"], "gains": [2, 2, 2]},
+       cells=True,
+   )
+
 Transcript Points
 -----------------
 

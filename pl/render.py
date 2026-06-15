@@ -24,6 +24,19 @@ _SPLAT_OPTION_KEYS = {
     "splat_cmap",
 }
 
+_BINNED_SPLAT_OPTION_KEYS = {
+    "genes",
+    "gains",
+    "sigma_um",
+    "global_norm",
+    "smooth",
+    "show_ticks",
+    "show_legend",
+    "legend_loc",
+    "splat_alpha",
+    "splat_cmap",
+}
+
 _POINT_OPTION_KEYS = {
     "genes",
     "max_points",
@@ -221,6 +234,7 @@ def _collect_render_legend(
     *,
     image_specs,
     splat_opts,
+    binned_splat_opts,
     point_opts,
     cell_opts,
     bounds,
@@ -250,6 +264,15 @@ def _collect_render_legend(
         ]
         if entries:
             sections.append(("Transcript density", entries))
+
+    if binned_splat_opts is not None:
+        names = _legend_gene_channel_names(binned_splat_opts.get("genes"))
+        entries = [
+            {"kind": "patch", "label": name, "color": _RGB_COLORS[i], "alpha": 1.0}
+            for i, name in enumerate(names[:3])
+        ]
+        if entries:
+            sections.append(("Binned transcript density", entries))
 
     if point_opts is not None:
         names = _legend_gene_channel_names(point_opts.get("genes"))
@@ -542,6 +565,7 @@ def render(
     image=None,
     images=None,
     splat=None,
+    binned_splat=None,
     points=None,
     cells=None,
     bounds=None,
@@ -608,6 +632,12 @@ def render(
 
         To pass plotting options, provide a dictionary containing ``genes``.
         Common option keys include ``gains``, ``pixel_size_um``, ``sigma_um``,
+        ``smooth``, ``global_norm``, ``splat_alpha``, and ``show_legend``.
+    binned_splat : str, sequence, dict, or None
+        Binned transcript-density layer from ``xdata.binned_adata``. This has
+        the same simple gene and gene-set forms as ``splat`` but uses
+        ``plot_binned_splat`` internally. Run ``xdata.create_binned_adata()``
+        before using it. Common option keys include ``gains``, ``sigma_um``,
         ``smooth``, ``global_norm``, ``splat_alpha``, and ``show_legend``.
     points : str, sequence, dict, or None
         Transcript point layer. Simple gene forms are accepted, or provide a
@@ -689,6 +719,7 @@ def render(
     bounds = _resolve_bounds(xdata, bounds)
     image_specs = _normalize_images(image=image, images=images, level=level)
     splat_opts = _normalize_gene_layer(splat, _SPLAT_OPTION_KEYS)
+    binned_splat_opts = _normalize_gene_layer(binned_splat, _BINNED_SPLAT_OPTION_KEYS)
     point_opts = _normalize_gene_layer(points, _POINT_OPTION_KEYS)
     cell_opts = {} if cells is True else (dict(cells) if isinstance(cells, dict) else None)
     show_combined_legend = _normalize_legend_setting(legend)
@@ -699,6 +730,7 @@ def render(
             xdata,
             image_specs=image_specs,
             splat_opts=splat_opts,
+            binned_splat_opts=binned_splat_opts,
             point_opts=point_opts,
             cell_opts=cell_opts,
             bounds=bounds,
@@ -707,6 +739,9 @@ def render(
         if splat_opts is not None:
             splat_opts = dict(splat_opts)
             splat_opts["show_legend"] = False
+        if binned_splat_opts is not None:
+            binned_splat_opts = dict(binned_splat_opts)
+            binned_splat_opts["show_legend"] = False
         if point_opts is not None:
             point_opts = dict(point_opts)
             point_opts["show_legend"] = False
@@ -752,6 +787,13 @@ def render(
         splat_opts.setdefault("show_legend", False)
         splat_opts.setdefault("splat_alpha", 0.8)
         xdata.plot_splat(genes=genes, bounds=bounds, ax=ax, **splat_opts)
+
+    if binned_splat_opts is not None:
+        binned_splat_opts = dict(binned_splat_opts)
+        genes = binned_splat_opts.pop("genes", None)
+        binned_splat_opts.setdefault("show_legend", False)
+        binned_splat_opts.setdefault("splat_alpha", 0.8)
+        xdata.plot_binned_splat(genes=genes, bounds=bounds, ax=ax, **binned_splat_opts)
 
     if point_opts is not None:
         point_opts = dict(point_opts)

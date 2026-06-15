@@ -52,6 +52,7 @@ except ImportError:
 __all__ = [
     "CellMatrixLoadResult",
     "_make_gene_panel_df",
+    "gene_panel_to_dataframe",
     "load_xenium_cell_matrix",
     "read_classic_analysis_clusters",
     "read_xen_panel",
@@ -66,6 +67,7 @@ class CellMatrixLoadResult:
     adata: object
     clusters: pd.DataFrame
     gene_panel: dict | None
+    feature_metadata: pd.DataFrame
 
 
 def read_xen_panel(gene_panel_file):
@@ -74,27 +76,108 @@ def read_xen_panel(gene_panel_file):
         return json.load(f)
 
 
-def _make_gene_panel_df(gene_panel_dict):
-    """Convert a Xenium gene panel dictionary to a DataFrame."""
-    out = {}
-    for target in gene_panel_dict["payload"]["targets"]:
-        gene_id = None
-        if "id" in target["type"]["data"]:
-            gene_id = target["type"]["data"]["id"]
-        gene_name = target["type"]["data"]["name"]
-        panel_identity = target["source"]["identity"]
+def gene_panel_to_dataframe(gene_panel_dict, adata=None):
+    """
+    Convert a Xenium ``gene_panel.json`` dictionary to a feature metadata table.
 
-        out[gene_name] = {
-            "Gene_ID": gene_id,
-            "Description": target["type"]["descriptor"],
-            "Coverage": target["info"]["gene_coverage"],
-            "Panel_ID": panel_identity["design_id"],
-            "Panel_Name": panel_identity["name"],
-        }
-        if "version" in panel_identity:
-            out[gene_name]["Panel_Version"] = panel_identity["version"]
+    The returned DataFrame is indexed by feature name. When ``adata`` is
+    supplied, the table includes ``in_adata`` plus available count metrics from
+    ``adata.var``.
+    """
+    columns = [
+        "gene_id",
+        "feature_type",
+        "description",
+        "coverage",
+        "codewords",
+        "panel_id",
+        "panel_name",
+        "panel_version",
+        "panel_category",
+        "panel_species",
+        "panel_tissue",
+        "panel_description",
+        "in_adata",
+        "n_cells",
+        "total_counts",
+    ]
+    if not gene_panel_dict:
+        return pd.DataFrame(columns=columns).rename_axis("feature_name")
 
-    return pd.DataFrame.from_dict(out, orient="index")
+    payload = gene_panel_dict.get("payload", {})
+    panel = payload.get("panel", {})
+    panel_identity = panel.get("identity", {})
+    rows = []
+
+    for target in payload.get("targets", []):
+        target_type = target.get("type", {})
+        target_data = target_type.get("data", {})
+        source = target.get("source", {})
+        source_identity = source.get("identity", {})
+        info = target.get("info", {})
+        name = target_data.get("name")
+        if name is None:
+            continue
+        rows.append(
+            {
+                "feature_name": str(name),
+                "gene_id": target_data.get("id"),
+                "feature_type": target_type.get("descriptor"),
+                "description": target_type.get("descriptor"),
+                "coverage": info.get("gene_coverage"),
+                "codewords": tuple(target.get("codewords", ())),
+                "panel_id": source_identity.get("design_id") or panel_identity.get("design_id"),
+                "panel_name": source_identity.get("name") or panel_identity.get("name"),
+                "panel_version": source_identity.get("version") or panel_identity.get("version"),
+                "panel_category": source.get("category"),
+                "panel_species": panel.get("species"),
+                "panel_tissue": panel.get("tissue"),
+                "panel_description": panel.get("description"),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=columns).rename_axis("feature_name")
+    df = df.drop_duplicates("feature_name", keep="first").set_index("feature_name")
+
+    if adata is not None:
+        adata_var = adata.var
+        df["in_adata"] = df.index.isin(adata_var.index.astype(str))
+        for col in ("n_cells", "total_counts"):
+            if col in adata_var.columns:
+                df[col] = adata_var[col].reindex(df.index)
+            else:
+                df[col] = np.nan
+    else:
+        df["in_adata"] = False
+        df["n_cells"] = np.nan
+        df["total_counts"] = np.nan
+
+    for col in columns:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df.loc[:, columns].rename_axis("feature_name")
+
+
+def _make_gene_panel_df(gene_panel_dict, adata=None):
+    """Compatibility wrapper for ``gene_panel_to_dataframe``."""
+    return gene_panel_to_dataframe(gene_panel_dict, adata=adata)
+
+
+def _merge_feature_metadata_into_var(adata, feature_metadata):
+    if adata is None or feature_metadata is None or feature_metadata.empty:
+        return
+    shared = feature_metadata.reindex(adata.var_names)
+    for col in shared.columns:
+        if col == "in_adata":
+            continue
+        if col in adata.var.columns:
+            missing = adata.var[col].isna()
+            if missing.any():
+                adata.var.loc[missing, col] = shared.loc[missing, col]
+        else:
+            adata.var[col] = shared[col]
 
 
 def read_classic_analysis_clusters(xenium_folder, verbose=True):
@@ -227,7 +310,14 @@ def load_xenium_cell_matrix(
         clusters = _read_analysis_zarr(xenium_folder, verbose=verbose)
         if len(clusters):
             adata.obs = adata.obs.merge(clusters, left_index=True, right_index=True, how="left")
-        return CellMatrixLoadResult(adata=adata, clusters=clusters, gene_panel=gene_panel)
+        feature_metadata = gene_panel_to_dataframe(gene_panel, adata=adata)
+        _merge_feature_metadata_into_var(adata, feature_metadata)
+        return CellMatrixLoadResult(
+            adata=adata,
+            clusters=clusters,
+            gene_panel=gene_panel,
+            feature_metadata=feature_metadata,
+        )
 
     if bundle_format == "parquet":
         clusters = read_classic_analysis_clusters(xenium_folder, verbose=verbose)
@@ -239,15 +329,13 @@ def load_xenium_cell_matrix(
             verbose=verbose,
         )
         adata.obs = adata.obs.merge(clusters, left_index=True, right_index=True, how="left")
-        if gene_panel is not None:
-            # Preserve historical behavior by computing the merge target without
-            # mutating var; this will be tightened in a later API cleanup pass.
-            adata.var.merge(
-                _make_gene_panel_df(gene_panel),
-                left_index=True,
-                right_index=True,
-                how="left",
-            )
-        return CellMatrixLoadResult(adata=adata, clusters=clusters, gene_panel=gene_panel)
+        feature_metadata = gene_panel_to_dataframe(gene_panel, adata=adata)
+        _merge_feature_metadata_into_var(adata, feature_metadata)
+        return CellMatrixLoadResult(
+            adata=adata,
+            clusters=clusters,
+            gene_panel=gene_panel,
+            feature_metadata=feature_metadata,
+        )
 
     raise ValueError("bundle_format must be 'zarr' or 'parquet'.")

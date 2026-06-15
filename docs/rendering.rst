@@ -56,7 +56,7 @@ Basic Example
 API Reference
 -------------
 
-.. function:: xdata.render(*, image=None, images=None, splat=None, points=None, cells=None, bounds=None, ax=None, figsize=(8, 8), dpi=None, level=None, background="black", show_axis=False, title=None, legend=True, legend_loc="outside right", legend_title=None, legend_max_items=30, save=None, save_kwargs=None)
+.. function:: xdata.render(*, image=None, images=None, splat=None, binned_splat=None, points=None, cells=None, bounds=None, ax=None, figsize=(8, 8), dpi=None, level=None, background="black", show_axis=False, title=None, legend=True, legend_loc="outside right", legend_title=None, legend_max_items=30, save=None, save_kwargs=None)
 
    Render a composite spatial view from common XenData layer types.
 
@@ -87,6 +87,12 @@ Parameters
     :meth:`~xentools.XenData.plot_splat`. A dictionary containing recognized
     splat option keys is interpreted as a full options dictionary, for example
     ``splat={"genes": ["EPCAM", "KRT19"], "gains": [2, 1]}``.
+
+``binned_splat`` : str, sequence, dict, or None, default ``None``
+    Binned transcript-density layer specification. This uses
+    ``xdata.binned_adata`` via :meth:`~xentools.XenData.plot_binned_splat`,
+    so run ``xdata.create_binned_adata()`` first. It accepts the same simple
+    gene forms as ``splat``.
 
 ``points`` : str, sequence, dict, or None, default ``None``
     Single-transcript point layer specification. Simple gene forms are
@@ -237,6 +243,34 @@ Splat options are passed inside the ``splat`` dictionary.
 ``show_legend`` : bool, default disabled when ``legend=True``
     Whether to draw the lower-level splat legend. In normal composites,
     ``render`` disables this and represents the splat in the combined legend.
+
+Binned Splat Options
+~~~~~~~~~~~~~~~~~~~~
+
+Binned splat options are passed inside the ``binned_splat`` dictionary. This
+layer uses ``xdata.binned_adata`` instead of transcript coordinates, so run
+``xdata.create_binned_adata()`` first.
+
+``genes`` : str, sequence, dict, or None
+    Gene or genes to draw from the binned matrix. A dictionary maps channel
+    names to gene lists, as with ``splat``.
+
+``gains`` : float or sequence, default inherited from ``plot_binned_splat``
+    Brightness scaling. A scalar applies to all channels. A sequence applies
+    per channel.
+
+``sigma_um`` : float, optional
+    Gaussian smoothing radius in microns applied to the binned image.
+
+``smooth`` : bool, optional
+    Whether to smooth the binned counts.
+
+``global_norm`` : bool, optional
+    If ``True``, normalize all channels together. If ``False``, normalize each
+    channel independently.
+
+``splat_alpha`` : float, default ``0.8`` in ``render``
+    Maximum opacity of the binned splat overlay when drawn over other layers.
 
 Point Options
 ~~~~~~~~~~~~~

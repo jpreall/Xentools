@@ -67,6 +67,7 @@ class GeneSetPicker:
         self._coverage = pd.DataFrame()
         self._widget = None
         self._widget_state = {}
+        self._sync_xdata()
 
     @property
     def databases(self) -> list[str]:
@@ -221,7 +222,12 @@ class GeneSetPicker:
             min_genes=self.min_genes,
         )
         self._coverage = coverage_summary(converted, self._gene_sets)
+        self._sync_xdata()
         self._refresh_widget_status()
+
+    def _sync_xdata(self):
+        if self.xdata is not None:
+            self.xdata.picked_gene_sets = self.gene_sets
 
     def _build_widget(self, widgets):
         dbs = self.databases

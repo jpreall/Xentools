@@ -48,6 +48,25 @@ def test_render_image_splat_points_cells_composite(xdata):
     assert ax.images[-1].get_array().shape[-1] == 4
 
 
+def test_render_image_binned_splat_composite(xdata):
+    genes = _genes(xdata)
+    xdata.create_binned_adata(bin_size=100, include_features=genes)
+
+    ax = xdata.render(
+        image={"channel": "DAPI", "level": 4},
+        binned_splat={"genes": genes, "gains": [2, 2, 2]},
+        bounds=_bounds(),
+    )
+
+    assert isinstance(ax, matplotlib.axes.Axes)
+    assert len(ax.images) >= 2
+    assert ax.images[-1].get_array().shape[-1] == 4
+    legend = ax.get_legend()
+    assert legend is not None
+    labels = [text.get_text().strip() for text in legend.get_texts()]
+    assert "Binned transcript density" in labels
+
+
 def test_render_builds_single_combined_legend(xdata):
     genes = _genes(xdata)
 

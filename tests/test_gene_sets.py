@@ -32,6 +32,8 @@ def test_xendata_gene_set_picker_methods(xdata):
     try:
         assert isinstance(picker, xentools.gene_sets.GeneSetPicker)
         assert picker.xdata is xdata
+        assert xdata._gene_set_picker is picker
+        assert xdata.picked_gene_sets == {}
     finally:
         picker.close()
 
@@ -41,6 +43,25 @@ def test_xendata_gene_set_picker_methods(xdata):
         assert alias.xdata is xdata
     finally:
         alias.close()
+
+
+def test_xendata_picked_gene_sets_tracks_picker_selection(xdata):
+    picker = xdata.gene_set_picker()
+    try:
+        row = picker.search("Fibroblast", database="Tabula_Muris").iloc[0]
+        picker.add("Tabula_Muris", row.gene_set)
+        assert xdata.picked_gene_sets == picker.gene_sets
+        assert row.gene_set in xdata.picked_gene_sets
+
+        picker.remove(row.gene_set)
+        assert xdata.picked_gene_sets == {}
+
+        picker.add("Tabula_Muris", row.gene_set)
+        assert xdata.picked_gene_sets
+        picker.clear()
+        assert xdata.picked_gene_sets == {}
+    finally:
+        picker.close()
 
 
 def test_picker_mouse_library_matches_dataset_symbol_case(xdata):

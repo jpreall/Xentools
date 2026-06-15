@@ -149,6 +149,7 @@ bin_expression = _pl_namespace.bin_expression
 create_binned_image = _pl_namespace.create_binned_image
 rasterize = _pl_namespace.rasterize
 rasterize_rgb = _pl_namespace.rasterize_rgb
+plot_binned_splat = _pl_namespace.plot_binned_splat
 plot_binned_rgb = _pl_namespace.plot_binned_rgb
 create_multilayer_image = _pl_namespace.create_multilayer_image
 plot_binned_greyscale = _pl_namespace.plot_binned_greyscale
@@ -169,6 +170,7 @@ io = _io_namespace
 gene_sets = _gene_sets_namespace
 utils = _utils_namespace
 _make_gene_panel_df = _io_namespace.read._make_gene_panel_df
+gene_panel_to_dataframe = _io_namespace.read.gene_panel_to_dataframe
 read_xen_panel = _io_namespace.read.read_xen_panel
 read_xenium_to_anndata = _io_namespace.read.read_xenium_to_anndata
 ROI_to_pixels = _utils_namespace.ROI_to_pixels
@@ -186,6 +188,7 @@ __all__ = [
     "ROIClass",
     "ROICollection",
     "read_xen_panel",
+    "gene_panel_to_dataframe",
     "um_to_pixels",
     "read_xenium_to_anndata",
     "frame",
@@ -203,6 +206,7 @@ __all__ = [
     "create_binned_image",
     "rasterize",
     "rasterize_rgb",
+    "plot_binned_splat",
     "plot_binned_rgb",
     "create_multilayer_image",
     "plot_binned_greyscale",

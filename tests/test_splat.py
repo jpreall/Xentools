@@ -71,6 +71,22 @@ def test_xendata_splat_single_gene_uses_scalar_default_gain(xdata):
     assert display.shape[-1] == 1
 
 
+def test_xendata_splat_two_channels_displays_rgb_padded_image(xdata):
+    genes = _test_genes(xdata, n=2)
+
+    ax = xdata.splat(
+        genes,
+        bounds=_coarse_bounds(xdata),
+        pixel_size_um=100,
+        sigma_um=1,
+        show_legend=False,
+    )
+
+    plotted = ax.images[-1].get_array()
+    assert plotted.ndim == 3
+    assert plotted.shape[-1] == 3
+
+
 def test_xentools_pl_splat_matches_default_axes_contract(xdata):
     import xentools
 
@@ -140,6 +156,78 @@ def test_splat_rejects_more_than_three_channels(xdata):
             bounds=_coarse_bounds(xdata),
             pixel_size_um=100,
             sigma_um=1,
+            show_legend=False,
+        )
+
+
+def test_binned_splat_returns_axes_and_arrays(xdata):
+    genes = _test_genes(xdata)
+    xdata.create_binned_adata(bin_size=100, include_features=genes)
+    bounds = _coarse_bounds(xdata)
+
+    ax = xdata.plot_binned_splat(
+        genes,
+        bounds=bounds,
+        show_legend=False,
+    )
+    display = xdata.plot_binned_splat(
+        genes,
+        bounds=bounds,
+        show_legend=False,
+        return_array=True,
+    )
+    raw = xdata.plot_binned_splat(
+        genes,
+        bounds=bounds,
+        show_legend=False,
+        return_array="raw",
+    )
+
+    assert isinstance(ax, matplotlib.axes.Axes)
+    assert len(ax.images) == 1
+    assert display.shape == raw.shape
+    assert display.shape[-1] == len(genes)
+    assert display.min() >= 0
+    assert display.max() <= 1
+
+
+def test_binned_splat_over_existing_image_uses_transparent_rgba_overlay(xdata):
+    genes = _test_genes(xdata)
+    xdata.create_binned_adata(bin_size=100, include_features=genes)
+    bounds = _coarse_bounds(xdata)
+    _, ax = plt.subplots()
+    ax.imshow(
+        np.zeros((20, 20)),
+        extent=bounds,
+        origin="lower",
+        cmap="gray",
+    )
+
+    returned = xdata.plot_binned_splat(
+        genes,
+        ax=ax,
+        bounds=bounds,
+        show_legend=False,
+        splat_alpha=0.5,
+    )
+
+    overlay = returned.images[-1].get_array()
+    assert returned is ax
+    assert len(ax.images) == 2
+    assert overlay.ndim == 3
+    assert overlay.shape[-1] == 4
+    assert np.nanmax(overlay[..., 3]) <= 0.5
+
+
+def test_binned_splat_rejects_more_than_three_channels(xdata):
+    genes = _test_genes(xdata, n=4)
+    xdata.create_binned_adata(bin_size=100, include_features=genes)
+    gene_sets = {f"set_{i}": [gene] for i, gene in enumerate(genes)}
+
+    with pytest.raises(ValueError, match="at most 3"):
+        xdata.plot_binned_splat(
+            gene_sets,
+            bounds=_coarse_bounds(xdata),
             show_legend=False,
         )
 

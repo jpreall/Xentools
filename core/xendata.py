@@ -166,6 +166,7 @@ class XenData:
         self.adata = cells.adata
         self.clusters = cells.clusters
         self.gene_panel = cells.gene_panel
+        self.feature_metadata = cells.feature_metadata
 
         boundaries = loaded.boundaries
         self.cell_boundaries = boundaries.cell_boundaries
@@ -1078,6 +1079,85 @@ class XenData:
 
     plot_splat = splat
 
+    def plot_binned_splat(
+        self,
+        genes=None,
+        *,
+        bounds=None,
+        gains=1.0,
+        sigma_um: float = 0.0,
+        smooth: bool = False,
+        global_norm: bool = False,
+        ax=None,
+        figsize: Optional[tuple] = None,
+        dpi: Optional[int] = None,
+        show_ticks: bool = False,
+        show_legend: bool = True,
+        legend_loc: str = "outside right",
+        splat_alpha: float = 0.8,
+        splat_cmap: str = "hot",
+        return_array=False,
+        save=None,
+        save_kwargs: Optional[dict] = None,
+    ):
+        """
+        Plot gene or gene-set density from ``self.binned_adata``.
+
+        This mirrors ``plot_splat`` but uses a precomputed binned AnnData matrix
+        instead of rasterizing transcript coordinates. Run
+        ``create_binned_adata()`` first.
+        """
+        if not hasattr(self, "binned_adata") or self.binned_adata is None:
+            raise ValueError("No binned_adata found. Run create_binned_adata() first.")
+
+        if bounds is None:
+            if getattr(self, "active_roi", None) is not None:
+                bounds = _roi_bounds_um(self.active_roi)
+            else:
+                bounds = (self.xmin, self.xmax, self.ymin, self.ymax)
+
+        existing_image_count = len(ax.images) if ax is not None else 0
+        rgb, disp, ax = _pl_namespace.plot_binned_splat(
+            self,
+            genes=genes,
+            bounds=bounds,
+            gains=gains,
+            sigma_um=sigma_um,
+            smooth=smooth,
+            global_norm=global_norm,
+            ax=ax,
+            show_ticks=show_ticks,
+            show_legend=show_legend,
+            legend_loc=legend_loc,
+            return_array="_all",
+        )
+
+        if existing_image_count > 0:
+            n_ch = disp.shape[-1]
+            if n_ch >= 3:
+                signal = disp[..., :3].max(axis=-1)
+                rgba = np.zeros((*disp.shape[:2], 4), dtype=np.float32)
+                rgba[..., :3] = disp[..., :3]
+            else:
+                rgba = plt.get_cmap(splat_cmap)(disp[..., 0]).astype(np.float32)
+                signal = disp[..., 0]
+            rgba[..., 3] = np.clip(signal * splat_alpha, 0, 1)
+            ax.images[-1].set_data(rgba)
+
+        if figsize is not None:
+            ax.figure.set_size_inches(*figsize)
+        if dpi is not None:
+            ax.figure.set_dpi(dpi)
+
+        _save_figure(ax, save=save, save_kwargs=save_kwargs)
+        if return_array in (False, None):
+            return ax
+        if return_array is True or return_array == "display":
+            return disp
+        if return_array == "raw":
+            return rgb
+        raise ValueError("return_array must be False, True, 'display', or 'raw'.")
+
     def plot_boundaries(
         self,
         kind: str = 'cell',
@@ -1382,8 +1462,15 @@ class XenData:
 
         This is the recommended method-style spelling. ``GeneSetPicker`` is the
         class name; Python method names are conventionally snake_case.
+
+        The picker is returned for users who want direct control, and the
+        currently selected, filtered dictionary is mirrored to
+        ``self.picked_gene_sets`` whenever selections change.
         """
-        return _gene_sets_namespace.pick(self, **kwargs)
+        picker = _gene_sets_namespace.pick(self, **kwargs)
+        self._gene_set_picker = picker
+        self.picked_gene_sets = picker.gene_sets
+        return picker
 
     def GeneSetPicker(self, **kwargs):
         """
@@ -1412,6 +1499,7 @@ class XenData:
         image=None,
         images=None,
         splat=None,
+        binned_splat=None,
         points=None,
         cells=None,
         bounds=None,
@@ -1456,6 +1544,10 @@ class XenData:
             dictionary is treated as the ``genes`` argument to
             :meth:`plot_splat`. A dictionary containing plotting option keys can
             also be used, e.g. ``splat={"genes": ["EPCAM"], "gains": [2]}``.
+        binned_splat : str, list, dict, or None
+            Binned transcript-density layer from ``self.binned_adata``. Run
+            ``create_binned_adata()`` first. Accepts the same gene forms as
+            ``splat`` or a dictionary of :meth:`plot_binned_splat` options.
         points : str, list, dict, or None
             Transcript point layer. Accepts the same gene forms as ``splat`` or
             a dictionary of :meth:`plot_points` options, e.g.
@@ -1521,6 +1613,7 @@ class XenData:
             image=image,
             images=images,
             splat=splat,
+            binned_splat=binned_splat,
             points=points,
             cells=cells,
             bounds=bounds,

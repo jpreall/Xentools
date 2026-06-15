@@ -8,7 +8,7 @@ The intended workflow is:
 
 1. Launch a picker with ``xdata.gene_set_picker()``.
 2. Select gene sets interactively, or with ``search()`` and ``add()``.
-3. Use ``picker.gene_sets`` directly in plotting or Scanpy functions.
+3. Use ``xdata.picked_gene_sets`` directly in plotting or Scanpy functions.
 
 Basic Workflow
 --------------
@@ -18,25 +18,25 @@ Basic Workflow
    import xentools
 
    xdata = xentools.XenData("/path/to/xenium/outs")
-   picker = xdata.gene_set_picker()
-   picker
+   xdata.gene_set_picker()
 
-In a Jupyter notebook, evaluating ``picker`` as the final expression in a cell
-opens the interactive picker widget. Calling ``picker.show()`` is equivalent
-and can be useful when the picker is not the final expression.
+In a Jupyter notebook, this opens the interactive picker widget. As selections
+change, Xentools stores the filtered output dictionary at
+``xdata.picked_gene_sets``.
 
-``xdata.gene_set_picker()`` is the preferred method-style spelling. The class is
-named ``GeneSetPicker``, and ``xdata.GeneSetPicker()`` is available as a
-discoverable alias, but Xentools follows Python's usual snake_case convention
-for instance methods.
+.. image:: _static/images/picker.png
+   :alt: Screenshot of the gene set picker widget.
+   :width: 700px
+   :align: center
+
 
 After selecting gene sets:
 
 .. code-block:: python
 
-   picker.gene_sets
+   xdata.picked_gene_sets
 
-``picker.gene_sets`` is a regular ``dict[str, list[str]]``. It is already
+``xdata.picked_gene_sets`` is a regular ``dict[str, list[str]]``. It is already
 converted between human and mouse when needed and filtered to genes present in
 ``xdata.adata.var_names``.
 
@@ -44,7 +44,7 @@ Use the selected gene sets in a Xentools splat:
 
 .. code-block:: python
 
-   xdata.plot_splat(genes=picker.gene_sets)
+   xdata.plot_splat(genes=xdata.picked_gene_sets)
 
 Or use the same dictionary in Scanpy-style plotting:
 
@@ -52,7 +52,7 @@ Or use the same dictionary in Scanpy-style plotting:
 
    import scanpy as sc
 
-   sc.pl.dotplot(xdata.adata, picker.gene_sets, groupby="Cluster")
+   sc.pl.dotplot(xdata.adata, xdata.picked_gene_sets, groupby="Cluster")
 
 The picker does not limit the number of selected gene sets. If a plotting
 function can only display a subset, that plotting function is responsible for
@@ -71,13 +71,18 @@ If widgets are unavailable, the picker still works programmatically:
    picker.add("MSigDB_Hallmark_2020", "Hypoxia")
    picker.add("MSigDB_Hallmark_2020", "Epithelial Mesenchymal Transition")
 
-   xdata.plot_splat(genes=picker.gene_sets)
+   xdata.plot_splat(genes=xdata.picked_gene_sets)
 
 Useful Picker Attributes
 ------------------------
 
+``xdata.picked_gene_sets``
+    The selected gene sets after species conversion and filtering to
+    ``xdata``. This is the simplest output to pass to plotting functions.
+
 ``picker.gene_sets``
-    Selected gene sets after species conversion and filtering to ``xdata``.
+    The same selected dictionary, accessed from the picker object returned by
+    ``xdata.gene_set_picker()``.
 
 ``picker.genes``
     Flat deduplicated list of all genes in ``picker.gene_sets``.

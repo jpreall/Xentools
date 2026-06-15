@@ -27,6 +27,7 @@ __all__ = [
     "create_binned_image",
     "rasterize",
     "rasterize_rgb",
+    "plot_binned_splat",
     "plot_binned_rgb",
     "create_multilayer_image",
     "plot_binned_greyscale",
@@ -118,6 +119,60 @@ def _normalize_splat_channels(
         )
 
     return chan_names, gene_signatures, channel_gene_lists
+
+
+def _normalize_binned_splat_channels(genes):
+    if genes is None:
+        return ["All bins"], [None]
+    if isinstance(genes, dict):
+        chan_names = list(genes.keys())
+        return chan_names, [list(genes[name]) for name in chan_names]
+    if isinstance(genes, str):
+        return [genes], [[genes]]
+    chan_names = list(genes)
+    return chan_names, [[gene] for gene in chan_names]
+
+
+def _as_dense_1d(matrix):
+    if hasattr(matrix, "toarray"):
+        return np.asarray(matrix.toarray()).reshape(-1)
+    return np.asarray(matrix).reshape(-1)
+
+
+def _resolve_binned_adata(data):
+    if hasattr(data, "binned_adata"):
+        if data.binned_adata is None:
+            raise ValueError("XenData object does not have binned_adata. Run create_binned_adata() first.")
+        return data.binned_adata
+    if hasattr(data, "obsm") and hasattr(data, "var_names"):
+        return data
+    raise ValueError("data must be a XenData object with binned_adata or an AnnData object.")
+
+
+def _binned_spatial_um(adata):
+    if "spatial_um" in adata.obsm:
+        return np.asarray(adata.obsm["spatial_um"], dtype=float)
+    if "spatial" in adata.obsm:
+        bin_size = float(adata.uns.get("bin_size", 1.0))
+        return np.asarray(adata.obsm["spatial"], dtype=float) * bin_size
+    raise ValueError("Binned AnnData must have obsm['spatial_um'] or obsm['spatial'].")
+
+
+def _resolve_binned_bounds(data, adata, bounds):
+    if bounds is not None:
+        return tuple(map(float, bounds))
+    roi = _resolve_active_roi(data, bounds)
+    if roi is not None:
+        return tuple(map(float, roi.bounds))
+    coords = _binned_spatial_um(adata)
+    if len(coords) == 0:
+        raise ValueError("Cannot infer bounds from empty binned AnnData.")
+    bin_size = float(adata.uns.get("bin_size", 1.0))
+    xmin = float(coords[:, 0].min() - bin_size / 2)
+    xmax = float(coords[:, 0].max() + bin_size / 2)
+    ymin = float(coords[:, 1].min() - bin_size / 2)
+    ymax = float(coords[:, 1].max() + bin_size / 2)
+    return xmin, xmax, ymin, ymax
 
 
 def _resolve_active_roi(data, bounds):
@@ -332,8 +387,10 @@ def _display_splat(
     extent = [xmin, xmax, ymin, ymax]
     if n_channels == 1:
         ax.imshow(disp[..., 0], extent=extent, origin="lower", interpolation="nearest", cmap="gray")
-    elif n_channels >= 3:
-        ax.imshow(disp[..., :3], extent=extent, origin="lower", interpolation="nearest")
+    else:
+        display_rgb = np.zeros((*disp.shape[:2], 3), dtype=disp.dtype)
+        display_rgb[..., : min(n_channels, 3)] = disp[..., : min(n_channels, 3)]
+        ax.imshow(display_rgb, extent=extent, origin="lower", interpolation="nearest")
 
     if show_ticks:
         ax.set_xlabel("x (µm)")
@@ -667,6 +724,115 @@ def plot_binned_rgb(xdata, genes_or_gene_sets, norm="per_gene", fig_scale=10, ga
     pl.tight_layout()
     save_figure(ax, save=save, save_kwargs=save_kwargs)
     pl.show()
+
+
+def plot_binned_splat(
+    data,
+    genes: Union[None, str, list[str], dict] = None,
+    *,
+    bounds=None,
+    gains=1.0,
+    sigma_um=0.0,
+    smooth=False,
+    global_norm=False,
+    ax=None,
+    show_ticks=False,
+    show_legend: bool = True,
+    legend_loc: str = "outside right",
+    return_array=False,
+    save=None,
+    save_kwargs: Optional[dict] = None,
+):
+    """
+    Plot RGB-like gene or gene-set density from precomputed ``binned_adata``.
+
+    This is the binned-data analogue of ``plot_splat``. It reads counts from a
+    precomputed binned AnnData matrix instead of rasterizing transcript
+    coordinates, making it useful for repeated large-region plotting once
+    ``xdata.create_binned_adata()`` has been run.
+    """
+    adata = _resolve_binned_adata(data)
+    chan_names, channel_gene_lists = _normalize_binned_splat_channels(genes)
+    n_channels = len(chan_names)
+    if n_channels > 3:
+        raise ValueError(
+            "plot_binned_splat can display at most 3 gene or gene-set channels as RGB. "
+            f"You passed {n_channels}."
+        )
+    if np.isscalar(gains):
+        gains = (float(gains),) * n_channels
+    else:
+        gains = tuple(gains)
+        if len(gains) != n_channels:
+            raise ValueError(f"gains length ({len(gains)}) must match number of channels ({n_channels})")
+
+    bin_size = float(adata.uns.get("bin_size", 1.0))
+    xmin, xmax, ymin, ymax = _resolve_binned_bounds(data, adata, bounds)
+    if xmax <= xmin or ymax <= ymin:
+        raise ValueError("bounds must define a positive-width and positive-height region.")
+
+    coords = _binned_spatial_um(adata)
+    if len(coords) == 0:
+        nx = int(np.ceil((xmax - xmin) / bin_size))
+        ny = int(np.ceil((ymax - ymin) / bin_size))
+        rgb = np.zeros((ny, nx, n_channels), dtype=np.float32)
+    else:
+        mask = (
+            (coords[:, 0] >= xmin)
+            & (coords[:, 0] <= xmax)
+            & (coords[:, 1] >= ymin)
+            & (coords[:, 1] <= ymax)
+        )
+        coords = coords[mask]
+        row_indices = np.flatnonzero(mask)
+        nx = int(np.ceil((xmax - xmin) / bin_size))
+        ny = int(np.ceil((ymax - ymin) / bin_size))
+        rgb = np.zeros((ny, nx, n_channels), dtype=np.float32)
+
+        x_idx = np.floor((coords[:, 0] - xmin) / bin_size).astype(np.int32)
+        y_idx = np.floor((ymax - coords[:, 1]) / bin_size).astype(np.int32)
+        valid = (x_idx >= 0) & (x_idx < nx) & (y_idx >= 0) & (y_idx < ny)
+
+        var_names = pd.Index(adata.var_names.astype(str))
+        for channel, gene_list in enumerate(channel_gene_lists):
+            if gene_list is None:
+                values = _as_dense_1d(adata.X[row_indices, :].sum(axis=1))
+            else:
+                present = [gene for gene in gene_list if gene in var_names]
+                if not present:
+                    continue
+                values = _as_dense_1d(adata[row_indices, present].X.sum(axis=1))
+            if not np.any(valid):
+                continue
+            np.add.at(rgb[..., channel], (y_idx[valid], x_idx[valid]), values[valid].astype(np.float32))
+
+    rgb, disp, ax = _display_splat(
+        rgb,
+        chan_names=chan_names,
+        gains=gains,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        sigma_px=float(sigma_um) / bin_size,
+        ax=ax,
+        global_norm=global_norm,
+        smooth=smooth,
+        show_ticks=show_ticks,
+        show_legend=show_legend,
+        legend_loc=legend_loc,
+    )
+
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
+    if return_array in (False, None):
+        return ax
+    if return_array is True or return_array == "display":
+        return disp
+    if return_array == "raw":
+        return rgb
+    if return_array == "_all":
+        return rgb, disp, ax
+    raise ValueError("return_array must be False, True, 'display', or 'raw'.")
 
 
 def create_multilayer_image(xdata, genes, log=False):

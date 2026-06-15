@@ -10,12 +10,14 @@ def test_top_level_module_has_explicit_public_api():
         "ROI",
         "ROICollection",
         "read_xen_panel",
+        "gene_panel_to_dataframe",
         "ROI_to_pixels",
         "import_cell_annotations",
         "neighborhood_composition",
         "points",
         "plot_points",
         "plot_splat",
+        "plot_binned_splat",
         "plot_image",
         "render",
         "splat",
@@ -63,6 +65,7 @@ def test_plotting_reexports_point_to_pl_namespace():
     assert xentools.points is xentools.pl.points
     assert xentools.plot_points is xentools.pl.plot_points
     assert xentools.plot_splat is xentools.pl.plot_splat
+    assert xentools.plot_binned_splat is xentools.pl.plot_binned_splat
     assert xentools.plot_image is xentools.pl.plot_image
     assert xentools.render is xentools.pl.render
     assert xentools.pl.plot_points is xentools.pl.points
@@ -88,6 +91,7 @@ def test_low_level_helpers_live_in_namespaces():
     import xentools
 
     assert xentools.read_xen_panel is xentools.io.read.read_xen_panel
+    assert xentools.gene_panel_to_dataframe is xentools.io.read.gene_panel_to_dataframe
     assert xentools.read_xenium_to_anndata is xentools.io.read.read_xenium_to_anndata
     assert hasattr(xentools.io.read, "create_polygon")
     assert hasattr(xentools.io.read, "import_segmentation_xenium_parquet")

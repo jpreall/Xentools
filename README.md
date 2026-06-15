@@ -1,13 +1,13 @@
 # xentools
 
-`xentools` is a lightweight analysis and visualization toolkit for 10x Xenium-style spatial transcriptomics outputs, with working support for both standard Xenium bundles and basic Atera whole-transcriptome Zarr bundles.
+`xentools` is a lightweight analysis and visualization toolkit for 10x Xenium-style spatial transcriptomics outputs, with working support for both standard Xenium bundles and basic Atera whole-transcriptome Zarr bundles. Xentools can facilitate structured and reproducible figure generation scripts for the purposes of publication and data presentation.
 
 Documentation: https://xentools.readthedocs.io/
 
 This snapshot is being frozen as a usable baseline for:
 - loading Xenium and Atera datasets into a `XenData` object
 - reading transcript, cell, boundary, image, and clustering data
-- plotting morphology overlays, splats, and boundaries
+- plotting morphology overlays, IF-style "gaussian splats", and boundaries
 - cropping data to ROIs, including GeoJSON-driven ROI workflows
 
 ## Current Status
@@ -99,7 +99,3 @@ ax = xd.plot_cells(genes=["EPCAM", "KRT19"], cmap="magma")
 - ROI files are commonly interpreted in pixel units and scaled internally by the dataset pixel size.
 - Large Atera datasets can be loaded lazily through `transcripts.zarr.zip`; transcript access is tile-based rather than fully materialized by default.
 - The repository currently contains internal code paths for Explorer export, but the public status of that feature should be considered pending.
-
-## Repository Scope
-
-This GitHub snapshot is intended to preserve the current working Atera-capable state of the codebase. Large local reference datasets, caches, editor settings, and scratch comparison notes are intentionally not part of the published repository state.
