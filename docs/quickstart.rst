@@ -28,7 +28,7 @@ Example output:
    ROIs               `ROIs`: 1 selections, 0 classes; active=`all`
    Common accessors:
    `xdata.trans`, `xdata.adata`, `xdata.clusters`, `xdata.cell_boundaries`,
-   `xdata.nucleus_boundaries`, `xdata.ROIs`, `xdata.images`
+   `xdata.nucleus_boundaries`, `xdata.rois`, `xdata.images`
 
 ``XenData`` reads the cell-feature matrix, cell metadata, image metadata,
 cluster assignments when present, transcript metadata, and boundary metadata.

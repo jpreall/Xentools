@@ -86,7 +86,6 @@ spatial regions.
    ax = xdata.plot_splat(
        genes=["EPCAM", "COL1A1", "PTPRC"],
        sigma_um=2.0,
-       pixel_size_um=1.0,
        gains=(1.0, 1.5, 2.0),
    )
 
@@ -106,6 +105,36 @@ the listed genes are summed into that channel.
 For zarr-backed lazy transcripts, ``plot_splat`` uses a direct zarr-to-raster
 path so it does not need to build an intermediate transcript DataFrame. This is
 especially useful for Atera-scale datasets and ROI-focused plotting.
+
+By default, ``plot_splat`` uses ``pixel_size_um="auto"`` and targets roughly
+1 million raster pixels. This keeps large-region notebook plotting responsive.
+To control output size directly, set ``target_pixels``:
+
+.. code-block:: python
+
+   ax = xdata.plot_splat(
+       genes=["EPCAM", "COL1A1", "PTPRC"],
+       target_pixels=8_000_000,
+   )
+
+For high-resolution figure generation, pass an explicit spatial resolution.
+Numeric ``pixel_size_um`` always overrides ``target_pixels``:
+
+.. code-block:: python
+
+   ax = xdata.plot_splat(
+       genes=["EPCAM", "COL1A1", "PTPRC"],
+       pixel_size_um=1.0,
+   )
+
+When auto-resolution chooses a coarser value, Xentools emits an informational
+warning. Experienced users can suppress these messages globally:
+
+.. code-block:: python
+
+   import xentools
+
+   xentools.settings.verbosity = 0
 
 Large gene signatures can still be expensive because each additional gene adds
 more zarr slices to read. To keep interactive plotting responsive, splats clip
@@ -222,6 +251,63 @@ Images
 
 If the image is pyramidal, choose a level appropriate for display. Higher
 levels are typically lower resolution and faster to display.
+
+External aligned images
+~~~~~~~~~~~~~~~~~~~~~~~
+
+H&E and separately acquired immunofluorescence OME-TIFFs can be registered
+from alignment files exported by Xenium Explorer:
+
+.. code-block:: python
+
+   he = xdata.import_aligned_image(
+       "20260803_117451_HE.ome.tif",
+       alignment_file="117451_HE_alignment_files.zip",
+       name="H&E",
+   )
+
+When ``alignment_file="auto"`` (the default), xentools searches beside the
+image and Xenium output and matches numeric sample identifiers, including IDs
+that differ only by leading zeros. Ambiguous matches produce an error asking
+for an explicit path.
+
+The returned ``AlignedImage`` records the affine transform, source dimensions,
+OME channel names, transformed bounds, and keypoint residuals:
+
+.. code-block:: python
+
+   print(he.keypoint_rmse_px, he.keypoint_max_error_px)
+   ax = xdata.show_image("H&E")
+   xdata.plot_boundaries(ax=ax, edgecolor="cyan")
+
+The source pyramid remains unchanged. Display reads only the required source
+region and applies the affine in micron coordinates. For a registered
+multi-channel image, choose a source channel by name or index:
+
+.. code-block:: python
+
+   xdata.show_image("IF", source_channel="CD3", cmap="magma")
+
+ROI outlines can be composed on any xentools image or transcript axes. All
+layers use the same native global coordinates, so plotting an ROI does not
+apply a separate coordinate reflection:
+
+.. code-block:: python
+
+   ax = xdata.show_image("DAPI")
+   xdata.rois.plot(
+       ax,
+       edgecolor="yellow",
+       linewidth=1,
+       labels=True,
+       label_kwargs={"fontsize": 8, "color": "white"},
+   )
+
+   ax = xdata.splat(["EPCAM", "KRT19"])
+   xdata.rois["all_liver"].plot(ax, edgecolor="cyan")
+
+The global Y axis follows image convention (values increase downward), and
+xentools displays it with descending Matplotlib Y limits.
 
 Boundaries
 ----------

@@ -47,8 +47,8 @@ def _resolve_roi(data, roi):
         return getattr(data, "active_roi", None)
     if roi is None:
         return None
-    if isinstance(roi, str) and hasattr(data, "ROIs"):
-        return data.ROIs.resolve(roi)
+    if isinstance(roi, str) and hasattr(data, "rois"):
+        return data.rois.resolve(roi)
     if hasattr(roi, "contains_points"):
         return roi
     raise ValueError("roi must be 'active', None, an ROI name, or an ROI-like object with contains_points().")
@@ -111,7 +111,7 @@ def neighborhood_composition(
         types.
     roi
         ``"active"`` uses ``xdata.active_roi`` when present. ``None`` uses all
-        cells. A string resolves a named ROI from ``xdata.ROIs``. ROI-like
+        cells. A string resolves a named ROI from ``xdata.rois``. ROI-like
         objects with ``contains_points`` are also accepted.
     normalize
         ``"count"`` returns raw neighbor counts or weighted sums. ``"prop"``

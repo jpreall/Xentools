@@ -764,7 +764,7 @@ class LazyTranscripts:
                         continue
 
                     x_idx = ((locs[mask, 0] - xmin) / pixel_size_um).astype(np.int32)
-                    y_idx = ((ymax - locs[mask, 1]) / pixel_size_um).astype(np.int32)
+                    y_idx = ((locs[mask, 1] - ymin) / pixel_size_um).astype(np.int32)
                     ch = channels[mask].astype(np.int32, copy=False)
                     valid_px = (x_idx >= 0) & (x_idx < nx) & (y_idx >= 0) & (y_idx < ny)
                     if not valid_px.any():

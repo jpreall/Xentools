@@ -28,13 +28,15 @@ def _load_local_module(module_name, relative_path):
 
 try:
     from .utils.misc import read_json
-    from .utils.geometry import ROI_to_pixels, frame, um_to_pixels
+    from .utils.geometry import frame, roi_to_pixels, um_to_pixels
+    from .settings import settings
 except ImportError:
     read_json = _load_local_module("_xentools_utils_misc", os.path.join("utils", "misc.py")).read_json
     _geometry_utils_mod = _load_local_module("_xentools_utils_geometry", os.path.join("utils", "geometry.py"))
-    ROI_to_pixels = _geometry_utils_mod.ROI_to_pixels
+    roi_to_pixels = _geometry_utils_mod.roi_to_pixels
     frame = _geometry_utils_mod.frame
     um_to_pixels = _geometry_utils_mod.um_to_pixels
+    settings = _load_local_module("_xentools_settings", "settings.py").settings
 
 
 def _is_lazy_transcripts(obj) -> bool:
@@ -54,6 +56,7 @@ def _is_lazy_transcripts(obj) -> bool:
 try:
     from .analysis.annotations import import_cell_annotations
     from .analysis.graph import build_spatial_graph
+    from .analysis.housekeeping import find_housekeeping_genes
     from .analysis.neighborhoods import neighborhood_composition
     from .analysis.niches import build_niches, evaluate_niche_k_values
     from .analysis.normalization import normalize_tp10k
@@ -65,6 +68,10 @@ except ImportError:
     _graph_mod = _load_local_module(
         "_xentools_analysis_graph",
         os.path.join("analysis", "graph.py"),
+    )
+    _housekeeping_mod = _load_local_module(
+        "_xentools_analysis_housekeeping",
+        os.path.join("analysis", "housekeeping.py"),
     )
     _niches_mod = _load_local_module(
         "_xentools_analysis_niches",
@@ -80,27 +87,36 @@ except ImportError:
     )
     import_cell_annotations = _annotations_mod.import_cell_annotations
     build_spatial_graph = _graph_mod.build_spatial_graph
+    find_housekeeping_genes = _housekeeping_mod.find_housekeeping_genes
     neighborhood_composition = _neighborhoods_mod.neighborhood_composition
     build_niches = _niches_mod.build_niches
     evaluate_niche_k_values = _niches_mod.evaluate_niche_k_values
     normalize_tp10k = _normalization_mod.normalize_tp10k
 
 try:
+    from .core.coordinates import CoordinateSystem, TransformRegistry
+    from .core.images import AlignedImage
     from .core.rois import (
         ROI,
         ROIClass,
         ROICollection,
-        read_ROI_from_csv,
-        read_ROI_from_geojson,
+        ROIGroup,
+        read_roi_from_csv,
+        read_roi_from_geojson,
     )
     from .core.boundaries import LazyBoundaryGeoDataFrame
 except ImportError:
+    _coordinates_mod = _load_local_module("_xentools_core_coordinates", "core/coordinates.py")
+    CoordinateSystem = _coordinates_mod.CoordinateSystem
+    TransformRegistry = _coordinates_mod.TransformRegistry
+    AlignedImage = _load_local_module("_xentools_core_images", "core/images.py").AlignedImage
     from core.rois import (
         ROI,
         ROIClass,
         ROICollection,
-        read_ROI_from_csv,
-        read_ROI_from_geojson,
+        ROIGroup,
+        read_roi_from_csv,
+        read_roi_from_geojson,
     )
     from core.boundaries import LazyBoundaryGeoDataFrame
 
@@ -162,6 +178,8 @@ plot_image = _pl_namespace.plot_image
 render = _pl_namespace.render
 niche_heatmap = _pl_namespace.niche_heatmap
 niche_map = _pl_namespace.niche_map
+show_aligned_image = _pl_namespace.show_aligned_image
+plot_housekeeping_diagnostics = _pl_namespace.plot_housekeeping_diagnostics
 show_ome_tiff = _pl_namespace.show_ome_tiff
 splat = _pl_namespace.splat
 pl = _pl_namespace
@@ -173,7 +191,7 @@ _make_gene_panel_df = _io_namespace.read._make_gene_panel_df
 gene_panel_to_dataframe = _io_namespace.read.gene_panel_to_dataframe
 read_xen_panel = _io_namespace.read.read_xen_panel
 read_xenium_to_anndata = _io_namespace.read.read_xenium_to_anndata
-ROI_to_pixels = _utils_namespace.ROI_to_pixels
+roi_to_pixels = _utils_namespace.roi_to_pixels
 frame = _utils_namespace.frame
 um_to_pixels = _utils_namespace.um_to_pixels
 
@@ -181,25 +199,32 @@ __all__ = [
     "io",
     "analysis",
     "gene_sets",
+    "settings",
     "XenData",
+    "AlignedImage",
+    "CoordinateSystem",
+    "TransformRegistry",
     "LazyTranscripts",
     "LazyBoundaryGeoDataFrame",
     "ROI",
     "ROIClass",
     "ROICollection",
+    "ROIGroup",
     "read_xen_panel",
     "gene_panel_to_dataframe",
     "um_to_pixels",
     "read_xenium_to_anndata",
     "frame",
-    "ROI_to_pixels",
+    "roi_to_pixels",
     "import_cell_annotations",
-    "read_ROI_from_csv",
-    "read_ROI_from_geojson",
+    "read_roi_from_csv",
+    "read_roi_from_geojson",
     "build_spatial_graph",
     "neighborhood_composition",
     "build_niches",
     "evaluate_niche_k_values",
+    "find_housekeeping_genes",
+    "plot_housekeeping_diagnostics",
     "normalize_tp10k",
     "create_bins",
     "bin_expression",
@@ -220,6 +245,7 @@ __all__ = [
     "niche_heatmap",
     "niche_map",
     "show_ome_tiff",
+    "show_aligned_image",
     "splat",
     "pl",
     "utils",

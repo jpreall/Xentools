@@ -16,9 +16,10 @@ import pandas as pd
 __all__ = [
     "ROI",
     "ROIClass",
+    "ROIGroup",
     "ROICollection",
-    "read_ROI_from_csv",
-    "read_ROI_from_geojson",
+    "read_roi_from_csv",
+    "read_roi_from_geojson",
     "_coerce_roi_geometry",
     "_coerce_roi",
     "_geometry_to_roi_points",
@@ -94,7 +95,7 @@ class ROI:
 
     def query_lazy_transcripts(self, lazy_transcripts, genes=None, quality="all"):
         xmin, xmax, ymin, ymax = self.bounds
-        return lazy_transcripts.query(
+        candidates = lazy_transcripts.query(
             xmin=xmin,
             xmax=xmax,
             ymin=ymin,
@@ -102,12 +103,22 @@ class ROI:
             genes=genes,
             quality=quality,
         )
+        return self.crop_dataframe(candidates)
 
     def plot(self, ax, **kwargs):
+        """
+        Draw the ROI outline on an existing axes.
+
+        ROI vertices are stored and drawn directly in the canonical ``global``
+        coordinate system. Xentools spatial axes use a downward Y direction,
+        so no crop-dependent coordinate reflection is required.
+        """
         poly_kwargs = dict(self.poly_kwargs)
         poly_kwargs.update(kwargs)
-        polygon = pl.Polygon(self.points, **poly_kwargs)
-        ax.add_patch(polygon)
+        for geometry in _geometry_polygons(self.geometry):
+            coordinates = np.asarray(geometry.exterior.coords, dtype=float).copy()
+            polygon = pl.Polygon(coordinates, **poly_kwargs)
+            ax.add_patch(polygon)
         return ax
 
     def to_pixels(self, pixel_size, name=None):
@@ -242,7 +253,7 @@ class ROI:
         units="micron",
         metadata=None,
     ):
-        geometry, area_um2 = read_ROI_from_geojson(
+        geometry, area_um2 = read_roi_from_geojson(
             geojson_path,
             feature=feature,
             scale_factor=scale_factor,
@@ -337,9 +348,93 @@ class ROIClass:
 
 
 @dataclass
+class ROIGroup:
+    """Named logical collection of ROIs with a combined union geometry."""
+
+    name: str
+    rois: list[ROI]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.rois:
+            raise ValueError("An ROIGroup must contain at least one ROI.")
+        if len({roi.units for roi in self.rois}) > 1:
+            raise ValueError("All ROIGroup members must use the same coordinate units.")
+
+    @property
+    def member_names(self):
+        return [roi.name for roi in self.rois]
+
+    @property
+    def union(self):
+        from shapely.ops import unary_union
+
+        metadata = dict(self.metadata)
+        metadata.update({"roi_group": self.name, "members": self.member_names})
+        return ROI.from_geometry(
+            unary_union([roi.geometry for roi in self.rois]),
+            name=self.name,
+            poly_kwargs=dict(self.rois[0].poly_kwargs),
+            source=self.rois[0].source,
+            units=self.rois[0].units,
+            metadata=metadata,
+        )
+
+    @property
+    def geometry(self):
+        return self.union.geometry
+
+    @property
+    def bounds(self):
+        return self.union.bounds
+
+    @property
+    def area(self):
+        return self.union.area
+
+    def contains_points(self, x, y):
+        return self.union.contains_points(x, y)
+
+    def plot(self, ax, **kwargs):
+        for roi in self.rois:
+            roi.plot(ax, **kwargs)
+        return ax
+
+    def to_geojson_feature(self, include_name=True):
+        return self.union.to_geojson_feature(include_name=include_name)
+
+    def __len__(self):
+        return len(self.rois)
+
+    def __iter__(self):
+        return iter(self.rois)
+
+
+def _short(value, width):
+    text = str(value)
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _count_label(count, singular, plural=None):
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _format_roi_area(roi):
+    area = float(roi.area)
+    if roi.units == "micron":
+        if area >= 1_000_000:
+            return f"{area / 1_000_000:.2f} mm²"
+        return f"{area:,.1f} µm²"
+    if roi.units == "pixel":
+        return f"{area:,.1f} px²"
+    return f"{area:,.1f} {roi.units}²"
+
+
+@dataclass(repr=False)
 class ROICollection:
     classes: dict[str, ROIClass] = field(default_factory=dict)
     flat_named: dict[str, ROI] = field(default_factory=dict)
+    groups: dict[str, ROIGroup] = field(default_factory=dict)
 
     def add(self, roi: ROI):
         key = str(roi.name) if roi.name is not None else f"roi_{len(self.flat_named)}"
@@ -362,6 +457,27 @@ class ROICollection:
     def all_rois(self):
         return list(self.flat_named.values())
 
+    def create_group(self, name, selectors, *, metadata=None, overwrite=False):
+        """Create a logical ROI group without modifying its member ROIs."""
+        name = str(name)
+        if name in self.flat_named or name in self.classes:
+            raise ValueError(f"ROI group name '{name}' conflicts with an ROI selection or class.")
+        if name in self.groups and not overwrite:
+            raise ValueError(f"ROI group '{name}' already exists; pass overwrite=True to replace it.")
+        if isinstance(selectors, (str, int, ROI, ROIClass, ROIGroup)):
+            selectors = [selectors]
+        members = [self.resolve(selector) for selector in selectors]
+        group = ROIGroup(
+            name=name,
+            rois=members,
+            metadata={} if metadata is None else dict(metadata),
+        )
+        self.groups[name] = group
+        return group
+
+    def group_names(self):
+        return list(self.groups.keys())
+
     @property
     def union(self):
         from shapely.ops import unary_union
@@ -381,15 +497,63 @@ class ROICollection:
     def get_union(self, class_name):
         return self.classes[class_name].union
 
-    def plot(self, ax, level: Literal["selection", "class"] = "selection", **kwargs):
+    def plot(
+        self,
+        ax,
+        level: Literal["selection", "class", "group"] = "selection",
+        *,
+        labels=False,
+        label_kwargs=None,
+        **kwargs,
+    ):
+        """
+        Draw ROI selections, classes, or groups on an existing axes.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Existing image, transcript, or other spatial axes.
+        level : {'selection', 'class', 'group'}
+            Which collection level to draw.
+        labels : bool, default False
+            Add names at ROI centroids. Classes and groups are labeled once at
+            the centroid of their union geometry.
+        label_kwargs : dict, optional
+            Keyword arguments forwarded to ``ax.text``. Defaults are derived
+            from the outline color and may be overridden here.
+        **kwargs
+            Outline options forwarded to :meth:`ROI.plot`, including
+            ``edgecolor`` and ``linewidth``.
+        """
         if level == "selection":
-            for roi in self.flat_named.values():
+            plot_items = list(self.flat_named.items())
+            for _, roi in plot_items:
                 roi.plot(ax, **kwargs)
         elif level == "class":
+            plot_items = [(name, roi_class.union) for name, roi_class in self.classes.items()]
             for roi_class in self.classes.values():
                 roi_class.plot(ax, **kwargs)
+        elif level == "group":
+            plot_items = [(name, roi_group.union) for name, roi_group in self.groups.items()]
+            for roi_group in self.groups.values():
+                roi_group.plot(ax, **kwargs)
         else:
-            raise ValueError("level must be 'selection' or 'class'.")
+            raise ValueError("level must be 'selection', 'class', or 'group'.")
+
+        if labels:
+            text_kwargs = {
+                "color": kwargs.get("edgecolor", "yellow"),
+                "fontsize": 9,
+                "fontweight": "bold",
+                "ha": "center",
+                "va": "center",
+                "clip_on": True,
+            }
+            if label_kwargs:
+                text_kwargs.update(label_kwargs)
+            for name, roi in plot_items:
+                x, y = roi.centroid
+                ax.text(x, y, str(name), **text_kwargs)
         return ax
 
     def items(self):
@@ -410,13 +574,132 @@ class ROICollection:
     def clear(self):
         self.classes.clear()
         self.flat_named.clear()
+        self.groups.clear()
 
     def summary(self):
+        n_classified = sum(roi.class_name is not None for roi in self.flat_named.values())
         return {
             "n_selections": len(self.flat_named),
             "n_classes": len(self.classes),
+            "n_groups": len(self.groups),
+            "n_classified": n_classified,
+            "n_unclassified": len(self.flat_named) - n_classified,
             "classes": {name: len(cls.rois) for name, cls in self.classes.items()},
+            "groups": {name: group.member_names for name, group in self.groups.items()},
         }
+
+    def __repr__(self):
+        summary = self.summary()
+        lines = [
+            "ROICollection",
+            (
+                f"  {_count_label(summary['n_selections'], 'selection')} · "
+                f"{summary['n_classified']} classified · {summary['n_unclassified']} unclassified"
+            ),
+            (
+                f"  {_count_label(summary['n_classes'], 'class', 'classes')} · "
+                f"{_count_label(summary['n_groups'], 'group')}"
+            ),
+        ]
+        if not self.flat_named and not self.groups:
+            return "\n".join(lines + ["  (empty)"])
+
+        memberships = {name: [] for name in self.flat_named}
+        for group_name, group in self.groups.items():
+            for member_name in group.member_names:
+                if member_name in memberships:
+                    memberships[member_name].append(group_name)
+
+        if self.flat_named:
+            lines.extend(["", "Selections", "  name                 class          groups               geometry        area"])
+            selections = list(self.flat_named.items())
+            for name, roi in selections[:12]:
+                group_text = ", ".join(memberships[name]) or "—"
+                lines.append(
+                    f"  {_short(name, 20):<20} {_short(roi.class_name or '—', 14):<14} "
+                    f"{_short(group_text, 20):<20} {_short(roi.geometry.geom_type, 15):<15} "
+                    f"{_format_roi_area(roi)}"
+                )
+            if len(selections) > 12:
+                lines.append(f"  … {len(selections) - 12} more")
+
+        if self.groups:
+            lines.extend(["", "Groups", "  name                 members  geometry        area"])
+            group_items = list(self.groups.items())
+            for name, group in group_items[:12]:
+                union = group.union
+                lines.append(
+                    f"  {_short(name, 20):<20} {len(group):>7}  "
+                    f"{_short(union.geometry.geom_type, 15):<15} {_format_roi_area(union)}"
+                )
+            if len(group_items) > 12:
+                lines.append(f"  … {len(group_items) - 12} more")
+
+        if self.classes or summary["n_unclassified"]:
+            lines.extend(["", "Classes"])
+            for name, roi_class in list(self.classes.items())[:12]:
+                lines.append(f"  {_short(name, 20):<20} {_count_label(len(roi_class), 'selection')}")
+            if summary["n_unclassified"]:
+                lines.append(
+                    f"  {'Unclassified':<20} "
+                    f"{_count_label(summary['n_unclassified'], 'selection')}"
+                )
+        return "\n".join(lines)
+
+    def _repr_html_(self):
+        from html import escape
+
+        summary = self.summary()
+        memberships = {name: [] for name in self.flat_named}
+        for group_name, group in self.groups.items():
+            for member_name in group.member_names:
+                if member_name in memberships:
+                    memberships[member_name].append(group_name)
+
+        parts = [
+            "<div><strong>ROICollection</strong><br>",
+            f"{escape(_count_label(summary['n_selections'], 'selection'))} &middot; ",
+            f"{summary['n_classified']} classified &middot; ",
+            f"{summary['n_unclassified']} unclassified<br>",
+            f"{escape(_count_label(summary['n_classes'], 'class', 'classes'))} &middot; ",
+            f"{escape(_count_label(summary['n_groups'], 'group'))}</div>",
+        ]
+        if self.flat_named:
+            parts.append("<h4>Selections</h4><table><thead><tr><th>Name</th><th>Class</th><th>Groups</th><th>Geometry</th><th>Area</th></tr></thead><tbody>")
+            selections = list(self.flat_named.items())
+            for name, roi in selections[:12]:
+                values = (
+                    name,
+                    roi.class_name or "—",
+                    ", ".join(memberships[name]) or "—",
+                    roi.geometry.geom_type,
+                    _format_roi_area(roi),
+                )
+                parts.append("<tr>" + "".join(f"<td>{escape(str(value))}</td>" for value in values) + "</tr>")
+            if len(selections) > 12:
+                parts.append(f"<tr><td colspan='5'><em>… {len(selections) - 12} more</em></td></tr>")
+            parts.append("</tbody></table>")
+        if self.groups:
+            parts.append("<h4>Groups</h4><table><thead><tr><th>Name</th><th>Members</th><th>Geometry</th><th>Area</th></tr></thead><tbody>")
+            for name, group in list(self.groups.items())[:12]:
+                union = group.union
+                values = (name, len(group), union.geometry.geom_type, _format_roi_area(union))
+                parts.append("<tr>" + "".join(f"<td>{escape(str(value))}</td>" for value in values) + "</tr>")
+            parts.append("</tbody></table>")
+        if self.classes or summary["n_unclassified"]:
+            parts.append("<h4>Classes</h4><table><tbody>")
+            for name, roi_class in list(self.classes.items())[:12]:
+                parts.append(
+                    f"<tr><td>{escape(name)}</td>"
+                    f"<td>{escape(_count_label(len(roi_class), 'selection'))}</td></tr>"
+                )
+            if summary["n_unclassified"]:
+                parts.append(
+                    "<tr><td>Unclassified</td>"
+                    f"<td>{escape(_count_label(summary['n_unclassified'], 'selection'))}</td></tr>"
+                )
+            parts.append("</tbody></table>")
+        return "".join(parts)
 
     def import_file(self, roi_file, roi_name=None, pixel_size=1.0, scale_geojson=True, append=True):
         if not append:
@@ -429,19 +712,23 @@ class ROICollection:
             scale_geojson=scale_geojson,
         )
 
-    def to_geojson_feature_collection(self, level: Literal["selection", "class"] = "selection"):
+    def to_geojson_feature_collection(self, level: Literal["selection", "class", "group"] = "selection"):
         if level == "selection":
             features = [roi.to_geojson_feature() for roi in self.flat_named.values()]
         elif level == "class":
             features = [roi_class.union.to_geojson_feature() for roi_class in self.classes.values()]
+        elif level == "group":
+            features = [roi_group.to_geojson_feature() for roi_group in self.groups.values()]
         else:
-            raise ValueError("level must be 'selection' or 'class'.")
+            raise ValueError("level must be 'selection', 'class', or 'group'.")
         return {"type": "FeatureCollection", "features": features}
 
     def resolve(self, selector):
         if isinstance(selector, ROI):
             return selector
         if isinstance(selector, ROIClass):
+            return selector.union
+        if isinstance(selector, ROIGroup):
             return selector.union
         if isinstance(selector, int):
             names = list(self.flat_named.keys())
@@ -453,6 +740,8 @@ class ROICollection:
                 return self.flat_named[selector]
             if selector in self.classes:
                 return self.classes[selector].union
+            if selector in self.groups:
+                return self.groups[selector].union
         raise KeyError(selector)
 
     def __getitem__(self, key):
@@ -460,10 +749,12 @@ class ROICollection:
             return self.flat_named[key]
         if key in self.classes:
             return self.classes[key]
+        if key in self.groups:
+            return self.groups[key]
         raise KeyError(key)
 
     def __contains__(self, key):
-        return key in self.flat_named or key in self.classes
+        return key in self.flat_named or key in self.classes or key in self.groups
 
     def __len__(self):
         return len(self.flat_named)
@@ -472,10 +763,10 @@ class ROICollection:
         return iter(self.flat_named)
 
     def __bool__(self):
-        return bool(self.flat_named or self.classes)
+        return bool(self.flat_named or self.classes or self.groups)
 
 
-def read_ROI_from_csv(csv_path, selection=None):
+def read_roi_from_csv(csv_path, selection=None):
     csv_path = Path(csv_path)
     header_lines = []
     with csv_path.open("r", encoding="utf-8") as f:
@@ -550,7 +841,7 @@ def read_ROI_from_csv(csv_path, selection=None):
     return coords, area_map.get(chosen)
 
 
-def read_ROI_from_geojson(geojson_path, feature=None, return_gdf=False, scale_factor=1.0):
+def read_roi_from_geojson(geojson_path, feature=None, return_gdf=False, scale_factor=1.0):
     rois = gpd.read_file(geojson_path)
     if rois.empty:
         raise ValueError(f"No ROI features found in GeoJSON file: {geojson_path}")
@@ -592,7 +883,7 @@ def _coerce_roi_geometry(roi_like, selection=None, pixel_size=1.0, scale_geojson
 
     if isinstance(roi_like, ROI):
         return roi_like.geometry
-    if isinstance(roi_like, ROIClass):
+    if isinstance(roi_like, (ROIClass, ROIGroup)):
         return roi_like.union.geometry
     if hasattr(roi_like, "geom_type"):
         return roi_like
@@ -601,9 +892,9 @@ def _coerce_roi_geometry(roi_like, selection=None, pixel_size=1.0, scale_geojson
             raise FileNotFoundError(f"ROI file not found: {roi_like}")
         if roi_like.lower().endswith((".geojson", ".json")):
             scale_factor = pixel_size if scale_geojson else 1.0
-            roi_geometry, _ = read_ROI_from_geojson(roi_like, feature=selection, scale_factor=scale_factor)
+            roi_geometry, _ = read_roi_from_geojson(roi_like, feature=selection, scale_factor=scale_factor)
             return roi_geometry
-        roi_like, _ = read_ROI_from_csv(roi_like, selection=selection)
+        roi_like, _ = read_roi_from_csv(roi_like, selection=selection)
     if isinstance(roi_like, np.ndarray):
         if roi_like.ndim != 2 or roi_like.shape[1] != 2:
             raise ValueError("ROI must be a 2D numpy array with shape (n, 2).")
@@ -620,7 +911,7 @@ def _coerce_roi_geometry(roi_like, selection=None, pixel_size=1.0, scale_geojson
 def _coerce_roi(roi_like, selection=None, pixel_size=1.0, scale_geojson=True, name=None, source=None, poly_kwargs=None):
     if isinstance(roi_like, ROI):
         return roi_like
-    if isinstance(roi_like, ROIClass):
+    if isinstance(roi_like, (ROIClass, ROIGroup)):
         return roi_like.union
     geometry = _coerce_roi_geometry(
         roi_like,
@@ -642,6 +933,15 @@ def _geometry_to_roi_points(geometry):
     if geometry.geom_type == "MultiPolygon":
         largest = max(geometry.geoms, key=lambda geom: geom.area)
         return np.asarray(largest.exterior.coords)
+    raise TypeError(f"Unsupported ROI geometry type: {geometry.geom_type}")
+
+
+def _geometry_polygons(geometry):
+    """Return every component of a Polygon or MultiPolygon."""
+    if geometry.geom_type == "Polygon":
+        return [geometry]
+    if geometry.geom_type == "MultiPolygon":
+        return list(geometry.geoms)
     raise TypeError(f"Unsupported ROI geometry type: {geometry.geom_type}")
 
 
@@ -790,7 +1090,7 @@ def _import_roi_records(roi_store, roi_file, roi_name=None, pixel_size=1.0, scal
     roi_path = os.fspath(roi_file)
     if roi_path.lower().endswith((".geojson", ".json")):
         scale_factor = pixel_size if scale_geojson else 1.0
-        _, _, rois = read_ROI_from_geojson(roi_path, return_gdf=True, scale_factor=scale_factor)
+        _, _, rois = read_roi_from_geojson(roi_path, return_gdf=True, scale_factor=scale_factor)
         imported_names = []
         selectors = roi_name if isinstance(roi_name, list) else ([roi_name] if roi_name is not None else None)
         class_counts = {}

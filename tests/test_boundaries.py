@@ -71,7 +71,7 @@ def test_plot_boundaries_standalone_respects_explicit_bounds(xdata):
     ax = xdata.plot_boundaries(kind="cell", bounds=bounds)
 
     assert ax.get_xlim() == pytest.approx(bounds[:2])
-    assert ax.get_ylim() == pytest.approx(bounds[2:])
+    assert ax.get_ylim() == pytest.approx((bounds[3], bounds[2]))
 
 
 def test_plot_boundaries_overlay_does_not_replace_axes_styling_or_limits(xdata):

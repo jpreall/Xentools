@@ -36,8 +36,8 @@ def _resolve_roi(data, roi):
         return getattr(data, "active_roi", None)
     if roi is None:
         return None
-    if isinstance(roi, str) and hasattr(data, "ROIs"):
-        return data.ROIs.resolve(roi)
+    if isinstance(roi, str) and hasattr(data, "rois"):
+        return data.rois.resolve(roi)
     if hasattr(roi, "contains_points"):
         return roi
     raise ValueError("roi must be 'active', None, an ROI name, or an ROI-like object with contains_points().")
@@ -283,8 +283,7 @@ def niche_map(
         x_hi = float(plot_coords[:, 0].max())
         y_lo = float(plot_coords[:, 1].min())
         y_hi = float(plot_coords[:, 1].max())
-        display_coords = plot_coords.copy()
-        display_coords[:, 1] = y_lo + y_hi - display_coords[:, 1]
+        display_coords = plot_coords
     else:
         x_lo = x_hi = y_lo = y_hi = None
         display_coords = plot_coords
@@ -330,7 +329,7 @@ def niche_map(
 
     if mask.any():
         ax.set_xlim(x_lo, x_hi)
-        ax.set_ylim(y_lo, y_hi)
+        ax.set_ylim(y_hi, y_lo)
     ax.set_aspect("equal")
     ax.set_title(title or color_label)
     if not show_axis:

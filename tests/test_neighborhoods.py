@@ -57,7 +57,7 @@ def test_neighborhood_composition_accepts_named_roi(xenium_testdata):
 
     xdata = xentools.XenData(str(xenium_testdata), verbose=False)
     roi = _roi_around_cells(xdata)
-    xdata.ROIs.add(roi)
+    xdata.rois.add(roi)
 
     out = xentools.analysis.neighborhood_composition(
         xdata,

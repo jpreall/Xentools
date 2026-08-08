@@ -14,6 +14,7 @@ _SPLAT_OPTION_KEYS = {
     "genes",
     "gains",
     "pixel_size_um",
+    "target_pixels",
     "sigma_um",
     "global_norm",
     "smooth",
@@ -22,6 +23,7 @@ _SPLAT_OPTION_KEYS = {
     "legend_loc",
     "splat_alpha",
     "splat_cmap",
+    "warn_auto_pixel_size",
 }
 
 _BINNED_SPLAT_OPTION_KEYS = {
@@ -753,7 +755,7 @@ def render(
         fig.patch.set_facecolor(background)
         ax.set_facecolor(background)
         ax.set_xlim(bounds[0], bounds[1])
-        ax.set_ylim(bounds[2], bounds[3])
+        ax.set_ylim(bounds[3], bounds[2])
 
     for i, spec in enumerate(image_specs):
         spec = dict(spec)

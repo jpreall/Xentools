@@ -24,6 +24,8 @@ from .images import (
     _image_extent_um,
     _parse_ome_xml,
     _source_series_level_arrays,
+    find_alignment_file,
+    load_aligned_image,
 )
 from .metadata import (
     XeniumMetadata,
@@ -67,6 +69,8 @@ __all__ = [
     "_image_extent_um",
     "_parse_ome_xml",
     "_source_series_level_arrays",
+    "find_alignment_file",
+    "load_aligned_image",
     "XeniumMetadata",
     "XeniumLoadResult",
     "discover_xenium_images",

@@ -10,10 +10,17 @@ Top-Level API
 .. autosummary::
 
    xentools.XenData
+   xentools.AlignedImage
+   xentools.CoordinateSystem
+   xentools.TransformRegistry
    xentools.LazyTranscripts
    xentools.LazyBoundaryGeoDataFrame
    xentools.ROI
    xentools.ROICollection
+   xentools.ROIGroup
+   xentools.CoordinateSystem
+   xentools.TransformRegistry
+   xentools.settings
    xentools.plot_image
    xentools.plot_points
    xentools.plot_splat
@@ -22,11 +29,14 @@ Top-Level API
    xentools.points
    xentools.splat
    xentools.show_ome_tiff
+   xentools.show_aligned_image
    xentools.plot_boundaries
    xentools.plot_cells
    xentools.build_niches
    xentools.evaluate_niche_k_values
    xentools.neighborhood_composition
+   xentools.find_housekeeping_genes
+   xentools.plot_housekeeping_diagnostics
    xentools.normalize_tp10k
    xentools.gene_panel_to_dataframe
 
@@ -62,8 +72,10 @@ Plotting Namespace
    xentools.pl.plot_image
    xentools.pl.render
    xentools.pl.show_ome_tiff
+   xentools.pl.show_aligned_image
    xentools.pl.plot_boundaries
    xentools.pl.plot_cells
+   xentools.pl.plot_housekeeping_diagnostics
    xentools.pl.rasterize
    xentools.pl.plot_binned_rgb
 
@@ -75,6 +87,7 @@ Analysis Namespace
    xentools.analysis.build_niches
    xentools.analysis.evaluate_niche_k_values
    xentools.analysis.neighborhood_composition
+   xentools.analysis.find_housekeeping_genes
    xentools.analysis.build_spatial_graph
    xentools.analysis.normalize_tp10k
    xentools.analysis.create_binned_adata
@@ -86,6 +99,7 @@ Core Objects
 
    xentools.ROI
    xentools.ROICollection
+   xentools.ROIGroup
    xentools.LazyTranscripts
    xentools.LazyTranscripts.query
    xentools.LazyTranscripts.iter_tiles

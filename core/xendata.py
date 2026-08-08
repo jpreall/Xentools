@@ -48,16 +48,20 @@ def _is_lazy_transcripts(obj) -> bool:
 
 
 try:
+    from .coordinates import TransformRegistry
     from .boundaries import LazyBoundaryGeoDataFrame
     from .rois import ROICollection, _coerce_roi, _resolve_roi_selection_selector, _roi_bounds_um
 except ImportError:
+    from core.coordinates import TransformRegistry
     from core.boundaries import LazyBoundaryGeoDataFrame
     from core.rois import ROICollection, _coerce_roi, _resolve_roi_selection_selector, _roi_bounds_um
 
 try:
     from ..analysis.binning import create_binned_adata as _create_binned_adata
     from ..analysis.neighborhoods import neighborhood_composition as _neighborhood_composition
-    from ..io.read.images import _image_extent_um
+    from ..analysis.housekeeping import find_housekeeping_genes as _find_housekeeping_genes
+    from ..io.read.images import _image_extent_um, find_alignment_file as _find_alignment_file
+    from ..io.read.images import load_aligned_image as _load_aligned_image
     from ..io.read.loader import load_xenium_folder
     from ..io.write.images import _pixel_aligned_bounds_um, write_ome_tiff as _write_ome_tiff_bundle
     from ..io.write.xenium import (
@@ -76,6 +80,10 @@ except ImportError:
     _neighborhoods_mod = _load_local_module(
         "_xentools_analysis_neighborhoods_for_xendata",
         os.path.join("..", "analysis", "neighborhoods.py"),
+    )
+    _housekeeping_mod = _load_local_module(
+        "_xentools_analysis_housekeeping_for_xendata",
+        os.path.join("..", "analysis", "housekeeping.py"),
     )
     _images_read_mod = _load_local_module(
         "_xentools_io_read_images_for_xendata",
@@ -112,7 +120,10 @@ except ImportError:
 
     _create_binned_adata = _binning_mod.create_binned_adata
     _neighborhood_composition = _neighborhoods_mod.neighborhood_composition
+    _find_housekeeping_genes = _housekeeping_mod.find_housekeeping_genes
     _image_extent_um = _images_read_mod._image_extent_um
+    _find_alignment_file = _images_read_mod.find_alignment_file
+    _load_aligned_image = _images_read_mod.load_aligned_image
     load_xenium_folder = _loader_read_mod.load_xenium_folder
     _pixel_aligned_bounds_um = _images_write_mod._pixel_aligned_bounds_um
     _write_ome_tiff_bundle = _images_write_mod.write_ome_tiff
@@ -124,6 +135,7 @@ except ImportError:
 
 create_bins = _pl_namespace.create_bins
 show_ome_tiff = _pl_namespace.show_ome_tiff
+show_aligned_image = _pl_namespace.show_aligned_image
 splat = _pl_namespace.splat
 points = _pl_namespace.points
 plot_splat = _pl_namespace.plot_splat
@@ -179,24 +191,33 @@ class XenData:
         self.pixel_size = metadata.pixel_size
         self.name = metadata.name
 
-        self.ROIs = ROICollection()
-        self.rois = self.ROIs
+        self.rois = ROICollection()
         self.active_roi = None
         self.subset_roi = None
         self.update_cell_names()
 
         self.images = metadata.images
         self.protein_images = metadata.protein_images
+        self.transforms = TransformRegistry()
+        identity = np.eye(3, dtype=float)
+        for element in ("points:transcripts", "points:cells", "shapes:cells", "shapes:nuclei", "shapes:rois"):
+            self.transforms.register(element, identity, source="global")
+        if "DAPI" in self.images:
+            pixel_to_global = np.array(
+                [[self.pixel_size, 0, 0], [0, self.pixel_size, 0], [0, 0, 1]],
+                dtype=float,
+            )
+            self.transforms.register("image:DAPI", pixel_to_global, source="pixels:DAPI")
 
         if roi_file is not None:
             if verbose:
                 print(f'Importing ROIs from file: {roi_file}')
-            imported_roi_names = self.import_ROI(
+            imported_roi_names = self.import_rois(
                 roi_file,
                 scale_geojson=True,
                 append=False,
             )
-            crop_target = _resolve_roi_selection_selector(self.ROIs, imported_roi_names, crop_to_selection)
+            crop_target = _resolve_roi_selection_selector(self.rois, imported_roi_names, crop_to_selection)
             if crop_target is not None:
                 if verbose:
                     print(f'Subsetting to ROI selection/class: {crop_target}')
@@ -281,7 +302,7 @@ class XenData:
                 return f"{kind}: available ({self._boundary_source})"
 
         def _roi_status():
-            summary = self.ROIs.summary()
+            summary = self.rois.summary()
             parts = [f"{summary['n_selections']} selections"]
             if summary["n_classes"]:
                 parts.append(f"{summary['n_classes']} classes")
@@ -405,11 +426,17 @@ class XenData:
             if self.protein_images is not None:
                 n_ch = len(self.protein_images.get('channel_names', []))
                 image_parts.append(f"`protein_images` ({n_ch} channels)")
+            aligned_names = [
+                name for name, image in self.images.items()
+                if hasattr(image, "source_to_fixed")
+            ]
+            if aligned_names:
+                image_parts.append(f"aligned: {', '.join(map(repr, aligned_names))}")
             lines.append(_line("Images", ", ".join(image_parts)))
 
-        roi_summary = self.ROIs.summary()
+        roi_summary = self.rois.summary()
         roi_desc = (
-            f"`ROIs`: {roi_summary['n_selections']} selections, "
+            f"`rois`: {roi_summary['n_selections']} selections, "
             f"{roi_summary['n_classes']} classes"
         )
         if self.active_roi is not None:
@@ -420,30 +447,30 @@ class XenData:
 
         lines.append("Common accessors:")
         lines.append("  `xdata.trans`, `xdata.adata`, `xdata.clusters`, `xdata.cell_boundaries`,")
-        lines.append("  `xdata.nucleus_boundaries`, `xdata.ROIs`, `xdata.images`")
+        lines.append("  `xdata.nucleus_boundaries`, `xdata.rois`, `xdata.images`")
         return "\n".join(lines)
     
-    def import_ROI(self,
+    def import_rois(self,
                    roi_file,
                    roi_name: Union[str, int, list, None]=None,
-                   plot_ROIs: bool = False,
+                   plot_rois: bool = False,
                    scale_geojson: bool = True,
                    append: bool = True):
         """
         Import one or more ROIs from either a legacy Xenium Analyzer CSV or a GeoJSON file.
-        Imported ROIs are stored in ``self.ROIs`` as an ``ROICollection`` that
+        Imported ROIs are stored in ``self.rois`` as an ``ROICollection`` that
         preserves both flat selections and Explorer-style ROI classes.
 
         Parameters:
         - roi_file: path to a ROI CSV or GeoJSON file
         - roi_name: ROI selector. For CSV, this is the Selection name or list of names.
           For GeoJSON, this can be a feature name, feature index, or list of either.
-        - plot_ROIs: If True, plots the imported ROIs over a scatter of cell centroids.
+        - plot_rois: If True, plots the imported ROIs over a scatter of cell centroids.
         - scale_geojson: If True, scales GeoJSON coordinates by ``self.pixel_size``.
         - append: If True (default), add these ROIs to the existing collection.
           If False, replace the existing ROI collection before importing.
         """
-        roi_names = self.ROIs.import_file(
+        roi_names = self.rois.import_file(
             roi_file=roi_file,
             roi_name=roi_name,
             pixel_size=self.pixel_size,
@@ -451,7 +478,7 @@ class XenData:
             append=append,
         )
 
-        summary = self.ROIs.summary()
+        summary = self.rois.summary()
         if summary["n_classes"]:
             class_detail = ", ".join(
                 f"{name} ({count})" for name, count in summary["classes"].items()
@@ -467,12 +494,12 @@ class XenData:
                 f"Collection now contains {summary['n_selections']} selection(s)."
             )
 
-        if self.subset_roi is None and self.ROIs:
-            self.active_roi = self.ROIs.union
+        if self.subset_roi is None and self.rois:
+            self.active_roi = self.rois.union
 
         ### OPTIONAL: plot the imported ROIs
         # Sample 100k cells for faster plotting
-        if plot_ROIs:
+        if plot_rois:
         
             n_cells = self.adata.obsm['spatial'].shape[0]
             if n_cells > 100000:
@@ -487,7 +514,7 @@ class XenData:
             ax.scatter(x, y, s=1, color='white', alpha=0.1)
             ax.set_facecolor('black')
 
-            for roi_name, roi in self.ROIs.items():
+            for roi_name, roi in self.rois.items():
                 roi.plot(ax)
                 # Annotate with ROI name at centroid
                 cx, cy = roi.centroid
@@ -507,34 +534,18 @@ class XenData:
 
         return roi_names
 
-    def import_ROI_xeniumanalyzer(self,
-                                  roi_csv_file,
-                                  roi_name: Union[str, list, None]=None,
-                                  plot_ROIs: bool = False):
-        """
-        Backward-compatible wrapper for importing ROI files.
-        Legacy Xenium Analyzer CSV files and newer GeoJSON ROI exports are both supported.
-        """
-        return self.import_ROI(
-            roi_file=roi_csv_file,
-            roi_name=roi_name,
-            plot_ROIs=plot_ROIs,
-            scale_geojson=True,
-        )
-
-
-    def subset_to_roi(self, ROI, selection=None, scale_geojson=True, inplace=True):
+    def subset_to_roi(self, roi, selection=None, scale_geojson=True, inplace=True):
         """
         Subset the data to a specified region of interest (ROI).
 
         Parameters:
-        - ROI: how to specify the ROI. Can be:
-            - path to a CSV file containing ROI coordinates (see read_ROI_from_csv)
+        - roi: how to specify the ROI. Can be:
+            - path to a CSV file containing ROI coordinates (see read_roi_from_csv)
             - path to a GeoJSON file containing one or more polygon features
             - a numpy array of x,y coordinates defining the ROI polygon: [[x1, y1], [x2, y2], ...]
             - a pandas DataFrame with two columns defining the ROI polygon
             - a shapely geometry object
-            - a key from self.ROIs (string name of a previously imported ROI)
+            - a key from self.rois (string name of a previously imported ROI)
         Options:
         - selection: if ROI is a file, the name or feature selector to choose (if multiple are present)
         - scale_geojson: if True, GeoJSON coordinates are scaled by ``self.pixel_size``.
@@ -546,14 +557,14 @@ class XenData:
         """
         if not inplace:
             obj = self.copy()
-            obj.subset_to_roi(ROI, selection=selection, scale_geojson=scale_geojson, inplace=True)
+            obj.subset_to_roi(roi, selection=selection, scale_geojson=scale_geojson, inplace=True)
             return obj
 
-        if isinstance(ROI, str) and ROI in self.ROIs:
-            roi_obj = self.ROIs.resolve(ROI)
+        if isinstance(roi, str) and roi in self.rois:
+            roi_obj = self.rois.resolve(roi)
         else:
             roi_obj = _coerce_roi(
-                ROI,
+                roi,
                 selection=selection,
                 pixel_size=self.pixel_size,
                 scale_geojson=scale_geojson,
@@ -564,17 +575,24 @@ class XenData:
         # Apply the filter to the DataFrame
         if _is_lazy_transcripts(self.trans):
             # Use polygon bbox for efficient tile selection, then apply exact polygon mask
-            df = roi_obj.query_lazy_transcripts(self.trans, quality="all")
-            self.trans = roi_obj.crop_dataframe(df).copy()
-            # Filter adata spatially by cell centroid so update_cell_names
-            # (called below) reads the already-subsetted obs_names
-            if self.adata is not None and 'x_centroid' in self.adata.obs.columns:
-                cx = self.adata.obs['x_centroid'].values
-                cy = self.adata.obs['y_centroid'].values
-                in_roi = roi_obj.contains_points(cx, cy)
-                self.adata = self.adata[in_roi, :].copy()
+            self.trans = roi_obj.query_lazy_transcripts(self.trans, quality="all").copy()
         else:
             self.trans = roi_obj.crop_dataframe(self.trans).copy()
+
+        # Always subset cells from their centroids. Inferring cell membership
+        # from retained transcript IDs fails for cells with no transcripts in
+        # the ROI and for disjoint ROI groups backed by eager transcript data.
+        if self.adata is not None:
+            if {'x_centroid', 'y_centroid'}.issubset(self.adata.obs.columns):
+                cell_xy = self.adata.obs[['x_centroid', 'y_centroid']].to_numpy(dtype=float)
+            elif 'spatial' in self.adata.obsm:
+                cell_xy = np.asarray(self.adata.obsm['spatial'], dtype=float)[:, :2]
+            else:
+                raise KeyError(
+                    "Cannot crop cells: expected obs centroid columns or adata.obsm['spatial']."
+                )
+            in_roi = roi_obj.contains_points(cell_xy[:, 0], cell_xy[:, 1])
+            self.adata = self.adata[np.asarray(in_roi, dtype=bool), :].copy()
 
         # Filter celldata
         self.update_cell_names()
@@ -619,17 +637,6 @@ class XenData:
         self.subset_roi = roi_obj
         self.active_roi = roi_obj
 
-    def crop_to_ROI(self, ROI, selection=None, scale_geojson=True, inplace=True):
-        """
-        Backward-compatible alias for ``subset_to_roi``.
-        """
-        return self.subset_to_roi(
-            ROI,
-            selection=selection,
-            scale_geojson=scale_geojson,
-            inplace=inplace,
-        )
-        
     def copy(self):
         import copy
         return copy.deepcopy(self)
@@ -641,8 +648,64 @@ class XenData:
         ``selector`` may be an ROI object, ROI class, selection/class name, or
         integer selection index.
         """
-        self.active_roi = self.ROIs.resolve(selector)
+        self.active_roi = self.rois.resolve(selector)
         return self.active_roi
+
+    def create_roi_group(self, name, selectors, *, metadata=None, overwrite=False):
+        """
+        Group existing ROIs under one name without modifying the source ROIs.
+
+        The resulting :class:`~xentools.ROIGroup` retains its members and
+        exposes their geometric union, which may be a disjoint ``MultiPolygon``.
+        The group name can be passed anywhere a named ROI is accepted, including
+        :meth:`set_active_roi`, :meth:`subset_to_roi`, and
+        :meth:`find_housekeeping_genes`.
+
+        Parameters
+        ----------
+        name : str
+            Unique name for the group, such as ``"all_liver"``.
+        selectors : str, int, ROI-like, or sequence
+            Existing selection, class, or group names; integer selection
+            indices; or ROI-like objects to combine. A sequence may mix these
+            selector types.
+        metadata : dict, optional
+            Group-level annotations, for example ``{"tissue": "liver"}``.
+        overwrite : bool, default False
+            Replace an existing group with the same name. Selection and class
+            name conflicts are always rejected.
+
+        Returns
+        -------
+        xentools.ROIGroup
+            Logical group containing the resolved member ROIs.
+
+        Examples
+        --------
+        >>> liver = xdata.create_roi_group(
+        ...     "all_liver",
+        ...     ["liver_piece_1", "liver_piece_2"],
+        ...     metadata={"tissue": "liver"},
+        ... )
+        >>> liver.member_names
+        ['liver_piece_1', 'liver_piece_2']
+        >>> liver_only = xdata.subset_to_roi("all_liver", inplace=False)
+        >>> ranking = xdata.find_housekeeping_genes(
+        ...     rois=["all_liver", "all_kidney"]
+        ... )
+
+        Notes
+        -----
+        Overlapping members are unioned and therefore do not double-count
+        cells. Cropping disjoint members uses exact polygon containment, though
+        image bounds may include slide space between the pieces.
+        """
+        return self.rois.create_group(
+            name,
+            selectors,
+            metadata=metadata,
+            overwrite=overwrite,
+        )
 
     def clear_active_roi(self):
         """
@@ -663,16 +726,6 @@ class XenData:
         self._subset_roi = value
 
     @property
-    def cropped_roi(self):
-        """
-        Backward-compatible alias for ``subset_roi``.
-        """
-        return self._subset_roi
-
-    @cropped_roi.setter
-    def cropped_roi(self, value):
-        self._subset_roi = value
-
     def write_xenium_explorer(
         self,
         output_dir,
@@ -786,6 +839,108 @@ class XenData:
             save_kwargs=save_kwargs,
         )
 
+    def import_aligned_image(
+        self,
+        image_path,
+        *,
+        alignment_file="auto",
+        name=None,
+        metadata=None,
+        overwrite=False,
+        poor_alignment_rmse_px=25.0,
+    ):
+        """
+        Register an external OME-TIFF using a Xenium Explorer alignment.
+
+        Explorer alignment bundles (a ZIP or extracted folder) contain
+        ``matrix.csv`` and usually ``keypoints.csv``. The matrix maps external-image pixels into Xenium
+        morphology pixels; keypoints are used to verify direction and report
+        residual error. The original pyramidal image is retained and transformed
+        lazily during display rather than resampled into a large duplicate.
+
+        Parameters
+        ----------
+        image_path : path-like
+            External OME-TIFF, such as an H&E or immunofluorescence image.
+        alignment_file : path-like or "auto"
+            Explorer alignment ZIP, extracted folder, standalone 3×3
+            ``matrix.csv``, or ``keypoints.csv`` beside its corresponding
+            ``matrix.csv``. ``"auto"``
+            searches beside the image and Xenium output and matches numeric sample
+            identifiers in their filenames.
+        name : str, optional
+            Image registry name used by :meth:`show_image`. Defaults to ``"H&E"``
+            for filenames ending in ``HE`` and otherwise to the image stem.
+        metadata : dict, optional
+            User annotations stored with the registration.
+        overwrite : bool, default False
+            Replace an existing image with the same registry name.
+        poor_alignment_rmse_px : float, default 25
+            Emit a diagnostic warning when keypoint RMSE exceeds this many fixed-
+            image pixels.
+
+        Returns
+        -------
+        xentools.AlignedImage
+            Transform, source metadata, bounds, channels, and validation metrics.
+
+        Examples
+        --------
+        >>> he = xdata.import_aligned_image(
+        ...     "20260803_117451_HE.ome.tif",
+        ...     alignment_file="117451_HE_alignment_files.zip",
+        ... )
+        >>> he.keypoint_rmse_px
+        0.0
+        >>> ax = xdata.show_image("H&E")
+        >>> xdata.plot_boundaries(ax=ax)
+        """
+        from pathlib import Path
+        import re
+        import tifffile
+
+        image_path = Path(image_path).expanduser().resolve()
+        if alignment_file == "auto":
+            alignment_file = _find_alignment_file(image_path, self.xenium_folder)
+        if name is None:
+            stem = image_path.name
+            stem = re.sub(r"\.ome\.tiff?$", "", stem, flags=re.IGNORECASE)
+            name = "H&E" if re.search(r"(?:^|[_-])HE$", stem, re.IGNORECASE) else stem
+        if name in self.images and not overwrite:
+            raise ValueError(
+                f"Image name {name!r} is already registered. Pass overwrite=True "
+                "or choose a different name."
+            )
+        fixed_path = self.images.get("DAPI")
+        if fixed_path is None or not isinstance(fixed_path, (str, os.PathLike)):
+            raise FileNotFoundError(
+                "A native DAPI morphology image is required as the fixed alignment frame."
+            )
+        with tifffile.TiffFile(fixed_path) as tif:
+            fixed_series = tif.series[0]
+            fixed_shape = (
+                int(fixed_series.shape[fixed_series.axes.index("Y")]),
+                int(fixed_series.shape[fixed_series.axes.index("X")]),
+            )
+        registration = _load_aligned_image(
+            image_path,
+            alignment_file,
+            name=name,
+            fixed_shape=fixed_shape,
+            fixed_pixel_size=self.pixel_size,
+            poor_alignment_rmse_px=poor_alignment_rmse_px,
+            metadata=metadata,
+        )
+        self.images[name] = registration
+        self.transforms.register(
+            f"image:{name}",
+            registration.source_to_global,
+            source=f"pixels:{name}",
+            metadata={"alignment_file": registration.alignment_file},
+            overwrite=overwrite,
+        )
+        return registration
+
     def show_image(self,
                    channel: str = 'DAPI',
                    bounds=None,
@@ -794,6 +949,7 @@ class XenData:
                    cmap: Optional[str] = None,
                    vmin: Optional[float] = None,
                    vmax: Optional[float] = None,
+                   source_channel=None,
                    z_index: Optional[int] = None,
                    level: Optional[int] = None,
                    micron_coords: Optional[bool] = None,
@@ -828,6 +984,9 @@ class XenData:
         vmin, vmax : float, optional
             Intensity range for display. If vmax is None, it is set automatically
             using ``clip_percentile``.
+        source_channel : str or int, optional
+            Channel within a registered multi-channel external image. Ignored
+            for native DAPI and linked morphology-focus channels.
         z_index : int, optional
             Which Z slice to show for multi-plane images. When None (default), a
             max-intensity projection across all Z slices is displayed.
@@ -862,6 +1021,7 @@ class XenData:
                 micron_coords = True
 
         # ── resolve source file and default colormap ──────────────────────────
+        aligned_registration = None
         if channel.upper() == 'DAPI':
             if 'DAPI' not in self.images:
                 raise FileNotFoundError(
@@ -869,6 +1029,10 @@ class XenData:
                 )
             image_path = self.images['DAPI']
             default_cmap = 'gray'
+        elif channel in self.images and hasattr(self.images[channel], "source_to_fixed"):
+            aligned_registration = self.images[channel]
+            default_cmap = None
+            image_path = aligned_registration.path
         else:
             if self.protein_images is None:
                 raise ValueError(
@@ -887,22 +1051,39 @@ class XenData:
         if cmap is None:
             cmap = default_cmap
 
-        ax = show_ome_tiff(
-            image_path,
-            figsize=figsize,
-            dpi=dpi,
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            clip_percentile=clip_percentile,
-            z_index=z_index,
-            pixel_size=self.pixel_size,
-            roi=roi,
-            level=level,
-            micron_coords=micron_coords,
-            ax=ax,
-            verbose=verbose,
-        )
+        if aligned_registration is not None:
+            ax = show_aligned_image(
+                aligned_registration,
+                bounds=None if roi is None else _roi_bounds_um(roi),
+                channel=source_channel,
+                z_index=z_index,
+                level=level,
+                figsize=figsize,
+                dpi=dpi,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                clip_percentile=clip_percentile,
+                ax=ax,
+                verbose=verbose,
+            )
+        else:
+            ax = show_ome_tiff(
+                image_path,
+                figsize=figsize,
+                dpi=dpi,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                clip_percentile=clip_percentile,
+                z_index=z_index,
+                pixel_size=self.pixel_size,
+                roi=roi,
+                level=level,
+                micron_coords=micron_coords,
+                ax=ax,
+                verbose=verbose,
+            )
         ax.set_title(channel, fontsize=12)
         _save_figure(ax, save=save, save_kwargs=save_kwargs)
         return ax
@@ -981,7 +1162,10 @@ class XenData:
             Axes to plot into. If ``None``, a new figure is created.
         **splat_kwargs
             Forwarded verbatim to the module-level ``splat()`` (e.g.
-            ``pixel_size_um``, ``sigma_um``, ``gains``, ``smooth``).
+            ``pixel_size_um``, ``target_pixels``, ``sigma_um``, ``gains``,
+            ``smooth``). By default, ``pixel_size_um='auto'`` selects a
+            display-oriented resolution from ``target_pixels``; pass a numeric
+            ``pixel_size_um`` to force exact output resolution.
             ``bounds`` is set automatically from the active ROI or the full
             transcript extent if not provided here.
 
@@ -991,11 +1175,13 @@ class XenData:
             Axes by default. If ``return_array`` is requested, returns either
             the normalized display array or the raw raster array.
         """
-        def _resolve_image_path(channel_name):
+        def _resolve_image_source(channel_name):
             if channel_name is None:
                 return None
             if channel_name.upper() == 'DAPI':
                 return self.images.get('DAPI')
+            if channel_name in self.images and hasattr(self.images[channel_name], "source_to_fixed"):
+                return self.images[channel_name]
             if self.protein_images is None:
                 return None
             channel_names = self.protein_images['channel_names']
@@ -1014,12 +1200,13 @@ class XenData:
                 roi_bounds = _roi_bounds_um(self.active_roi)
                 bounds = _pixel_aligned_bounds_um(roi_bounds, self.pixel_size)
             elif image_channel is not None:
-                image_path = _resolve_image_path(image_channel)
-                bounds = (
-                    _image_extent_um(image_path, self.pixel_size)
-                    if image_path is not None
-                    else (self.xmin, self.xmax, self.ymin, self.ymax)
-                )
+                image_source = _resolve_image_source(image_channel)
+                if hasattr(image_source, "micron_bounds"):
+                    bounds = image_source.micron_bounds
+                elif image_source is not None:
+                    bounds = _image_extent_um(image_source, self.pixel_size)
+                else:
+                    bounds = (self.xmin, self.xmax, self.ymin, self.ymax)
             else:
                 bounds = (self.xmin, self.xmax, self.ymin, self.ymax)
             splat_kwargs['bounds'] = bounds
@@ -1452,9 +1639,23 @@ class XenData:
 
         By default this uses ``self.active_roi`` when present. Pass
         ``roi=None`` to compute over all cells, or ``roi=<name>`` to use a
-        named ROI from ``self.ROIs``.
+        named ROI from ``self.rois``.
         """
         return _neighborhood_composition(self, **kwargs)
+
+    def find_housekeeping_genes(self, **kwargs):
+        """
+        Find well-expressed genes with minimal variation across this object's ROIs.
+
+        Raw counts are summarized within each ROI, filtered by expression and
+        detection, and ranked by within- and between-ROI stability without
+        library-size normalization.
+        """
+        return _find_housekeeping_genes(self, **kwargs)
+
+    def plot_housekeeping_diagnostics(self, ranking, **kwargs):
+        """Visualize a housekeeping-gene ranking produced for this object."""
+        return _pl_namespace.plot_housekeeping_diagnostics(ranking, **kwargs)
 
     def gene_set_picker(self, **kwargs):
         """
@@ -1657,13 +1858,13 @@ class XenData:
             include_features=include_features,
         )
 
-    def assign_cells_to_ROIs(self,
+    def assign_cells_to_rois(self,
                               method: Literal['centroid', 'majority'] = 'centroid',
                               level: Literal['selection', 'class'] = 'selection',
                               key_added: str = 'roi',
                               min_overlap: float = 0.0):
         """
-        Assign each cell to a named ROI from ``self.ROIs``, storing the result
+        Assign each cell to a named ROI from ``self.rois``, storing the result
         as a categorical column in ``self.adata.obs[key_added]``.
 
         Cells that fall outside every ROI are left as NaN.
@@ -1673,7 +1874,7 @@ class XenData:
         method : 'centroid' | 'majority'
             'centroid' (default, fast) — a cell is assigned to whichever ROI
             contains its centroid. If ROIs overlap and a centroid falls in more
-            than one, the last matching ROI in ``self.ROIs`` (insertion order)
+            than one, the last matching ROI in ``self.rois`` (insertion order)
             wins.
 
             'majority' (slower) — uses the full cell boundary polygon.  Each
@@ -1693,13 +1894,13 @@ class XenData:
         -------
         None — modifies ``self.adata.obs[key_added]`` in place.
         """
-        if not self.ROIs:
-            raise ValueError("No ROIs defined. Call import_ROI() first.")
+        if not self.rois:
+            raise ValueError("No ROIs defined. Call import_rois() first.")
 
         if level == 'selection':
-            roi_items = list(self.ROIs.items())
+            roi_items = list(self.rois.items())
         elif level == 'class':
-            roi_items = [(name, roi_class.union) for name, roi_class in self.ROIs.classes.items()]
+            roi_items = [(name, roi_class.union) for name, roi_class in self.rois.classes.items()]
         else:
             raise ValueError("level must be 'selection' or 'class'.")
 
@@ -1754,12 +1955,12 @@ class XenData:
         detail = ', '.join(f'{n}: {c:,}' for n, c in counts.items())
         print(f"Assigned {total:,}/{self.adata.n_obs:,} cells  [{detail}]")
 
-    def assign_bins_to_ROIs(self,
+    def assign_bins_to_rois(self,
                              level: Literal['selection', 'class'] = 'selection',
                              key_added: str = 'roi'):
         """
         Assign each spatial bin in ``self.binned_adata`` to a named ROI from
-        ``self.ROIs``, using the bin centroid (in microns).
+        ``self.rois``, using the bin centroid (in microns).
 
         Requires ``create_binned_adata()`` to have been run first.
         Bins that fall outside every ROI are left as NaN.
@@ -1780,8 +1981,8 @@ class XenData:
             raise AttributeError(
                 "No binned AnnData found. Run create_binned_adata() first."
             )
-        if not self.ROIs:
-            raise ValueError("No ROIs defined. Call import_ROI() first.")
+        if not self.rois:
+            raise ValueError("No ROIs defined. Call import_rois() first.")
 
         bin_size = self.binned_adata.uns['bin_size']
         x_stored = self.binned_adata.obs['x_bin'].values.astype(float)
@@ -1798,9 +1999,9 @@ class XenData:
         y_um = (y_orig   + 0.5) * bin_size
 
         if level == 'selection':
-            roi_items = list(self.ROIs.items())
+            roi_items = list(self.rois.items())
         elif level == 'class':
-            roi_items = [(name, roi_class.union) for name, roi_class in self.ROIs.classes.items()]
+            roi_items = [(name, roi_class.union) for name, roi_class in self.rois.classes.items()]
         else:
             raise ValueError("level must be 'selection' or 'class'.")
 

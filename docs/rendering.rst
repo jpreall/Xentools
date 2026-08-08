@@ -224,8 +224,13 @@ Splat options are passed inside the ``splat`` dictionary.
     Brightness scaling. A scalar applies to all channels. A sequence applies
     per channel.
 
-``pixel_size_um`` : float, optional
-    Raster pixel size in microns.
+``pixel_size_um`` : "auto" or float, default inherited from ``plot_splat``
+    Raster pixel size in microns. ``"auto"`` chooses a display-oriented
+    resolution from ``target_pixels``. A numeric value forces exact spatial
+    resolution and overrides ``target_pixels``.
+
+``target_pixels`` : int or None, default inherited from ``plot_splat``
+    Approximate raster pixel budget used when ``pixel_size_um="auto"``.
 
 ``sigma_um`` : float, optional
     Gaussian smoothing radius in microns.

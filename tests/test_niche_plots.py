@@ -35,17 +35,15 @@ def test_niche_map_plots_categorical_niche_labels(xdata):
     assert ax.get_legend() is not None
 
 
-def test_niche_map_flips_y_coordinates_to_match_display_convention(xdata):
+def test_niche_map_uses_native_global_coordinates(xdata):
     _build_small_niches(xdata)
     ax = xdata.niche_map(key_added="niche", roi=None, use_boundaries=False, s=2)
 
     plotted = ax.collections[0].get_offsets()
     coords = xdata.adata.obsm["spatial"]
-    y_lo = coords[:, 1].min()
-    y_hi = coords[:, 1].max()
-
     assert plotted[0, 0] == coords[0, 0]
-    assert plotted[0, 1] == y_lo + y_hi - coords[0, 1]
+    assert plotted[0, 1] == coords[0, 1]
+    assert ax.get_ylim()[0] > ax.get_ylim()[1]
 
 
 def test_niche_map_plots_continuous_composition_column(xdata):

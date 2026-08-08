@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["frame", "ROI_to_pixels", "um_to_pixels"]
+__all__ = ["frame", "roi_to_pixels", "um_to_pixels"]
 
 
-def ROI_to_pixels(ROI, pixel_size):
+def roi_to_pixels(roi, pixel_size):
     """
     Return integer pixel bounds for a legacy ROI coordinate array.
     """
-    xmin, xmax = int(ROI[:, 0].min() / pixel_size), int(ROI[:, 0].max() / pixel_size)
-    ymin, ymax = int(ROI[:, 1].min() / pixel_size), int(ROI[:, 1].max() / pixel_size)
+    xmin, xmax = int(roi[:, 0].min() / pixel_size), int(roi[:, 0].max() / pixel_size)
+    ymin, ymax = int(roi[:, 1].min() / pixel_size), int(roi[:, 1].max() / pixel_size)
     return xmin, xmax, ymin, ymax
 
 

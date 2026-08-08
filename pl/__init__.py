@@ -9,7 +9,8 @@ Import plotting functions here so users can access them as:
 
 from .boundaries import plot_boundaries, plot_cells
 from .colors import generate_palette, plot_palette
-from .images import show_ome_tiff
+from .images import show_aligned_image, show_ome_tiff
+from .housekeeping import plot_housekeeping_diagnostics
 from .niches import niche_heatmap, niche_map
 from .render import render
 from .transcripts import (
@@ -39,6 +40,7 @@ __all__ = [
     "niche_heatmap",
     "niche_map",
     "plot_binned_greyscale",
+    "plot_housekeeping_diagnostics",
     "plot_binned_rgb",
     "plot_binned_splat",
     "plot_boundaries",
@@ -52,5 +54,6 @@ __all__ = [
     "rasterize_rgb",
     "render",
     "show_ome_tiff",
+    "show_aligned_image",
     "splat",
 ]

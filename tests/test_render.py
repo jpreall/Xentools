@@ -207,7 +207,7 @@ def test_render_vector_only_layers_use_requested_bounds(xdata):
 
     assert len(ax.collections) >= 1
     assert tuple(float(v) for v in ax.get_xlim()) == _bounds()[:2]
-    assert tuple(float(v) for v in ax.get_ylim()) == _bounds()[2:]
+    assert tuple(float(v) for v in ax.get_ylim()) == (_bounds()[3], _bounds()[2])
 
 
 def test_render_multiple_images_uses_transparent_overlay(xdata):
@@ -257,10 +257,11 @@ def test_render_out_of_image_bounds_keeps_layer_extents_aligned(xdata):
 
     image_extent = tuple(float(v) for v in ax.images[0].get_extent())
     splat_extent = tuple(float(v) for v in ax.images[-1].get_extent())
-    assert image_extent == bounds
-    assert splat_extent == bounds
+    display_extent = (bounds[0], bounds[1], bounds[3], bounds[2])
+    assert image_extent == display_extent
+    assert splat_extent == display_extent
     assert tuple(float(v) for v in ax.get_xlim()) == bounds[:2]
-    assert tuple(float(v) for v in ax.get_ylim()) == bounds[2:]
+    assert tuple(float(v) for v in ax.get_ylim()) == (bounds[3], bounds[2])
 
 
 def test_pl_render_matches_xendata_method(xdata):

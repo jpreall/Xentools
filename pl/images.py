@@ -20,7 +20,162 @@ except ImportError:
     _scale_bounds_for_level = _images_write_mod._scale_bounds_for_level
 
 
-__all__ = ["show_ome_tiff"]
+__all__ = ["show_aligned_image", "show_ome_tiff"]
+
+
+def _resolve_channel_index(registration, channel, channel_count):
+    if channel is None:
+        return 0
+    if isinstance(channel, int):
+        index = channel
+    else:
+        if channel not in registration.channel_names:
+            raise ValueError(
+                f"Channel {channel!r} not found. Available channels: "
+                f"{registration.channel_names or list(range(channel_count))}"
+            )
+        index = registration.channel_names.index(channel)
+    if index < 0 or index >= channel_count:
+        raise IndexError(f"Channel index {index} is out of bounds for {channel_count} channels.")
+    return index
+
+
+def _read_aligned_region(level_array, axes, bounds, registration, channel=None, z_index=None):
+    x0, x1, y0, y1 = bounds
+    selections = []
+    remaining_axes = []
+    for axis, size in zip(axes, level_array.shape):
+        if axis == "Y":
+            selection = slice(y0, y1)
+        elif axis == "X":
+            selection = slice(x0, x1)
+        elif axis == "S":
+            selection = slice(None)
+            remaining_axes.append(axis)
+        elif axis == "C":
+            selection = _resolve_channel_index(registration, channel, size)
+        elif axis == "Z" and z_index is not None:
+            selection = int(z_index)
+        elif axis == "T":
+            selection = 0
+        else:
+            selection = slice(None)
+            remaining_axes.append(axis)
+        selections.append(selection)
+        if axis in {"Y", "X"}:
+            remaining_axes.append(axis)
+    image = np.asarray(level_array[tuple(selections)])
+    for axis in ("Z",):
+        if axis in remaining_axes:
+            index = remaining_axes.index(axis)
+            image = image.max(axis=index)
+            remaining_axes.pop(index)
+    desired = [remaining_axes.index("Y"), remaining_axes.index("X")]
+    if "S" in remaining_axes:
+        desired.append(remaining_axes.index("S"))
+    image = np.transpose(image, desired)
+    return image
+
+
+def show_aligned_image(
+    registration,
+    *,
+    bounds=None,
+    channel=None,
+    z_index=None,
+    level=None,
+    figsize=None,
+    dpi=None,
+    cmap=None,
+    vmin=None,
+    vmax=None,
+    clip_percentile=99.5,
+    ax=None,
+    verbose=True,
+    save=None,
+    save_kwargs=None,
+):
+    """Display a registered external image in xentools micron coordinates."""
+    import tifffile
+    from matplotlib.transforms import Affine2D
+
+    if dpi is None:
+        dpi = pl.rcParams["figure.dpi"]
+    if figsize is None:
+        figsize = pl.rcParams["figure.figsize"]
+    if bounds is None:
+        bounds = registration.micron_bounds
+    xmin, xmax, ymin, ymax = map(float, bounds)
+
+    inverse = np.linalg.inv(registration.source_to_global)
+    corners = np.array([[xmin, ymin, 1], [xmin, ymax, 1], [xmax, ymin, 1], [xmax, ymax, 1]]).T
+    source_corners = inverse @ corners
+    source_corners = source_corners[:2] / source_corners[2]
+    source_height, source_width = registration.source_shape
+    sx0 = max(0, int(np.floor(source_corners[0].min())))
+    sx1 = min(source_width, int(np.ceil(source_corners[0].max())))
+    sy0 = max(0, int(np.floor(source_corners[1].min())))
+    sy1 = min(source_height, int(np.ceil(source_corners[1].max())))
+    if sx0 >= sx1 or sy0 >= sy1:
+        raise ValueError(
+            f"Requested bounds {bounds} do not overlap aligned image {registration.name!r} "
+            f"with bounds {registration.micron_bounds}."
+        )
+
+    display_px = max(int(figsize[0] * dpi), int(figsize[1] * dpi))
+    with tifffile.TiffFile(registration.path) as tif:
+        series = tif.series[0]
+        level_arrays, zarr_store = _source_series_level_arrays(series)
+        try:
+            if level is None:
+                source_px = max(sx1 - sx0, sy1 - sy0)
+                best_level = 0
+                for i, candidate in enumerate(level_arrays):
+                    if source_px * candidate.shape[series.axes.index("X")] / source_width >= display_px:
+                        best_level = i
+            else:
+                best_level = min(max(int(level), 0), len(level_arrays) - 1)
+            level_array = level_arrays[best_level]
+            level_height = level_array.shape[series.axes.index("Y")]
+            level_width = level_array.shape[series.axes.index("X")]
+            scale_x = source_width / level_width
+            scale_y = source_height / level_height
+            lx0, lx1 = int(np.floor(sx0 / scale_x)), int(np.ceil(sx1 / scale_x))
+            ly0, ly1 = int(np.floor(sy0 / scale_y)), int(np.ceil(sy1 / scale_y))
+            image = _read_aligned_region(
+                level_array,
+                series.axes,
+                (lx0, lx1, ly0, ly1),
+                registration,
+                channel=channel,
+                z_index=z_index,
+            )
+        finally:
+            zarr_store.close()
+
+    if verbose:
+        print(
+            f"[show_aligned_image] {registration.name}: pyramid level "
+            f"{best_level}/{len(level_arrays)-1}, source crop {sx1-sx0} × {sy1-sy0} px"
+        )
+    own_figure = ax is None
+    if own_figure:
+        _, ax = pl.subplots(figsize=figsize, dpi=dpi)
+    transform = Affine2D(registration.source_to_global) + ax.transData
+    extent = (lx0 * scale_x, lx1 * scale_x, ly1 * scale_y, ly0 * scale_y)
+    kwargs = {"origin": "upper", "extent": extent, "transform": transform, "interpolation": "nearest"}
+    if image.ndim == 2:
+        if vmax is None:
+            vmax = float(np.percentile(image, clip_percentile))
+        kwargs.update(cmap=cmap or "gray", vmin=0 if vmin is None else vmin, vmax=vmax)
+    ax.imshow(image, **kwargs)
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymax, ymin)
+    ax.axis("off")
+    if own_figure:
+        pl.tight_layout()
+    save_figure(ax, save=save, save_kwargs=save_kwargs)
+    return ax
 
 
 def _roi_bounds_um(roi_geometry):
@@ -206,8 +361,8 @@ def show_ome_tiff(
             ]
         else:
             im_extent = [0.0, full_shape[-1] * pixel_size, 0.0, full_shape[-2] * pixel_size]
-        img = img[::-1]
-        imshow_kwargs = dict(origin="lower", extent=im_extent)
+        im_extent = [im_extent[0], im_extent[1], im_extent[3], im_extent[2]]
+        imshow_kwargs = dict(origin="upper", extent=im_extent)
     else:
         imshow_kwargs = {}
 

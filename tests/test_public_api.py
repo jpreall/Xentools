@@ -6,12 +6,17 @@ def test_top_level_module_has_explicit_public_api():
 
     expected = {
         "XenData",
+        "AlignedImage",
+        "CoordinateSystem",
+        "TransformRegistry",
         "LazyTranscripts",
         "ROI",
         "ROICollection",
+        "ROIGroup",
         "read_xen_panel",
         "gene_panel_to_dataframe",
-        "ROI_to_pixels",
+        "settings",
+        "roi_to_pixels",
         "import_cell_annotations",
         "neighborhood_composition",
         "points",
@@ -22,6 +27,7 @@ def test_top_level_module_has_explicit_public_api():
         "render",
         "splat",
         "show_ome_tiff",
+        "show_aligned_image",
         "plot_cells",
         "niche_heatmap",
         "niche_map",
@@ -29,6 +35,8 @@ def test_top_level_module_has_explicit_public_api():
         "build_niches",
         "evaluate_niche_k_values",
         "normalize_tp10k",
+        "find_housekeeping_genes",
+        "plot_housekeeping_diagnostics",
         "pl",
         "io",
         "utils",
@@ -54,6 +62,18 @@ def test_private_helpers_are_not_star_exports():
     assert "create_polygon" not in exported
     assert "import_segmentation_xenium_parquet" not in exported
     assert "import_segmentation_xenium_zarr" not in exported
+    assert "ROI_to_pixels" not in exported
+    assert "read_ROI_from_csv" not in exported
+    assert "read_ROI_from_geojson" not in exported
+
+
+def test_settings_exposes_global_verbosity():
+    import xentools
+
+    old = xentools.settings.verbosity
+    xentools.settings.verbosity = 0
+    assert xentools.settings.verbosity == 0
+    xentools.settings.verbosity = old
 
 
 def test_plotting_reexports_point_to_pl_namespace():
@@ -99,10 +119,10 @@ def test_low_level_helpers_live_in_namespaces():
     assert hasattr(xentools.utils, "read_json")
     assert hasattr(xentools.utils, "frame")
     assert hasattr(xentools.utils, "um_to_pixels")
-    assert hasattr(xentools.utils, "ROI_to_pixels")
+    assert hasattr(xentools.utils, "roi_to_pixels")
     assert xentools.frame is xentools.utils.frame
     assert xentools.um_to_pixels is xentools.utils.um_to_pixels
-    assert xentools.ROI_to_pixels is xentools.utils.ROI_to_pixels
+    assert xentools.roi_to_pixels is xentools.utils.roi_to_pixels
     assert callable(xentools.import_cell_annotations)
     assert callable(xentools.neighborhood_composition)
     assert xentools.neighborhood_composition is xentools.analysis.neighborhood_composition

@@ -16,9 +16,11 @@ from ._shared import _load_local_module
 
 try:
     from ..core.transcripts import LazyTranscripts
+    from ..settings import settings
 except ImportError:
     _transcripts_mod = _load_local_module("_xentools_core_transcripts_for_pl", "core/transcripts.py")
     LazyTranscripts = _transcripts_mod.LazyTranscripts
+    settings = _load_local_module("_xentools_settings_for_pl", "settings.py").settings
 
 
 __all__ = [
@@ -119,6 +121,49 @@ def _normalize_splat_channels(
         )
 
     return chan_names, gene_signatures, channel_gene_lists
+
+
+def _informational_warning(message, *, stacklevel=2):
+    if getattr(settings, "verbosity", 1) >= 1:
+        warnings.warn(message, UserWarning, stacklevel=stacklevel)
+
+
+def _resolve_splat_pixel_size_um(
+    pixel_size_um,
+    *,
+    bounds,
+    target_pixels=1_000_000,
+    warn_auto_pixel_size=True,
+):
+    if isinstance(pixel_size_um, str):
+        if pixel_size_um.lower() != "auto":
+            raise ValueError("pixel_size_um must be a positive number or 'auto'.")
+        auto = True
+    else:
+        resolved = float(pixel_size_um)
+        if resolved <= 0:
+            raise ValueError("pixel_size_um must be > 0.")
+        return resolved
+
+    if target_pixels is None:
+        resolved = 1.0
+    else:
+        target_pixels = float(target_pixels)
+        if target_pixels <= 0:
+            raise ValueError("target_pixels must be > 0 or None.")
+        xmin, xmax, ymin, ymax = map(float, bounds)
+        area = max((xmax - xmin) * (ymax - ymin), 0.0)
+        resolved = max(1.0, float(np.sqrt(area / target_pixels))) if area else 1.0
+
+    if auto and warn_auto_pixel_size and resolved > 1.0:
+        _informational_warning(
+            "plot_splat auto-selected "
+            f"pixel_size_um={resolved:.2f} to target ~{int(target_pixels):,} pixels. "
+            "Pass pixel_size_um explicitly for fixed-resolution output, or set "
+            "xentools.settings.verbosity = 0 to suppress this informational warning.",
+            stacklevel=3,
+        )
+    return resolved
 
 
 def _normalize_binned_splat_channels(genes):
@@ -384,13 +429,13 @@ def _display_splat(
     if ax is None:
         _, ax = plt.subplots(1, 1, figsize=(12, 12) if n_channels == 3 else (6, 6))
 
-    extent = [xmin, xmax, ymin, ymax]
+    extent = [xmin, xmax, ymax, ymin]
     if n_channels == 1:
-        ax.imshow(disp[..., 0], extent=extent, origin="lower", interpolation="nearest", cmap="gray")
+        ax.imshow(disp[..., 0], extent=extent, origin="upper", interpolation="nearest", cmap="gray")
     else:
         display_rgb = np.zeros((*disp.shape[:2], 3), dtype=disp.dtype)
         display_rgb[..., : min(n_channels, 3)] = disp[..., : min(n_channels, 3)]
-        ax.imshow(display_rgb, extent=extent, origin="lower", interpolation="nearest")
+        ax.imshow(display_rgb, extent=extent, origin="upper", interpolation="nearest")
 
     if show_ticks:
         ax.set_xlabel("x (µm)")
@@ -790,7 +835,7 @@ def plot_binned_splat(
         rgb = np.zeros((ny, nx, n_channels), dtype=np.float32)
 
         x_idx = np.floor((coords[:, 0] - xmin) / bin_size).astype(np.int32)
-        y_idx = np.floor((ymax - coords[:, 1]) / bin_size).astype(np.int32)
+        y_idx = np.floor((coords[:, 1] - ymin) / bin_size).astype(np.int32)
         valid = (x_idx >= 0) & (x_idx < nx) & (y_idx >= 0) & (y_idx < ny)
 
         var_names = pd.Index(adata.var_names.astype(str))
@@ -1028,8 +1073,7 @@ def points(
     else:
         xmin, xmax, ymin, ymax = map(float, resolved_bounds)
 
-    y_lo, y_hi = (ymin, ymax) if owns_ax else ax.get_ylim()
-    plot_y = y_lo + y_hi - df[y_col].to_numpy()
+    plot_y = df[y_col].to_numpy()
     groups, labels = _point_groups(df, genes=genes, gene_col=gene_col)
 
     if genes is None:
@@ -1120,7 +1164,7 @@ def points(
 
     if owns_ax:
         ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
+        ax.set_ylim(ymax, ymin)
     elif preserve_limits:
         ax.set_xlim(old_xlim)
         ax.set_ylim(old_ylim)
@@ -1145,7 +1189,8 @@ def splat(
     genes: Union[None, str, list[str], dict] = None,
     gains=1.0,
     bounds=None,
-    pixel_size_um=1.0,
+    pixel_size_um="auto",
+    target_pixels: Optional[int] = 1_000_000,
     sigma_um=2.0,
     ax=None,
     global_norm=False,
@@ -1158,6 +1203,7 @@ def splat(
     max_signature_genes: Optional[int] = 50,
     force_all_genes: bool = False,
     warn_on_signature_clip: bool = True,
+    warn_auto_pixel_size: bool = True,
     use_lazy_fast_path: bool = True,
     save=None,
     save_kwargs: Optional[dict] = None,
@@ -1169,6 +1215,9 @@ def splat(
     matplotlib axes containing the rendered image. Set ``return_array=True`` or
     ``return_array="display"`` to return the normalized display array instead,
     or ``return_array="raw"`` to return the raw binned/smoothed raster.
+    ``pixel_size_um="auto"`` selects a display-oriented resolution from
+    ``target_pixels``; pass a numeric ``pixel_size_um`` for fixed-resolution
+    output.
     """
     chan_names, gene_signatures, channel_gene_lists = _normalize_splat_channels(
         genes,
@@ -1213,6 +1262,12 @@ def splat(
 
         if use_lazy_fast_path and hasattr(df, "rasterize_channels") and None not in (qxmin, qxmax, qymin, qymax):
             xmin, xmax, ymin, ymax = qxmin, qxmax, qymin, qymax
+            pixel_size_um = _resolve_splat_pixel_size_um(
+                pixel_size_um,
+                bounds=(xmin, xmax, ymin, ymax),
+                target_pixels=target_pixels,
+                warn_auto_pixel_size=warn_auto_pixel_size,
+            )
             sigma_px = sigma_um / pixel_size_um
             rgb = df.rasterize_channels(
                 channel_gene_lists,
@@ -1264,6 +1319,12 @@ def splat(
     else:
         xmin, xmax, ymin, ymax = bounds
 
+    pixel_size_um = _resolve_splat_pixel_size_um(
+        pixel_size_um,
+        bounds=(xmin, xmax, ymin, ymax),
+        target_pixels=target_pixels,
+        warn_auto_pixel_size=warn_auto_pixel_size,
+    )
     nx = int(np.ceil((xmax - xmin) / pixel_size_um))
     ny = int(np.ceil((ymax - ymin) / pixel_size_um))
     if nx <= 0 or ny <= 0:
@@ -1287,7 +1348,7 @@ def splat(
 
     transcript_channel = chan_assignment[codes]
     x_idx_all = ((x - xmin) / pixel_size_um).astype(np.int32)
-    y_idx_all = ((ymax - y) / pixel_size_um).astype(np.int32)
+    y_idx_all = ((y - ymin) / pixel_size_um).astype(np.int32)
     valid_all = (x_idx_all >= 0) & (x_idx_all < nx) & (y_idx_all >= 0) & (y_idx_all < ny)
 
     for k in range(n_channels):

@@ -27,6 +27,33 @@ for analysis and visualization:
 ``xdata.rois``
     Named ROI objects loaded from GeoJSON/CSV files or created manually.
 
+``xdata.transforms``
+    Registry mapping each image, point table, and shape collection from its
+    intrinsic coordinates into the canonical ``global`` coordinate system.
+
+ROI API Naming
+--------------
+
+ROI classes follow normal Python class naming (``ROI``, ``ROIGroup``,
+``ROIClass``, and ``ROICollection``). Functions, methods, and attributes use
+lowercase names. The canonical collection is ``xdata.rois``.
+
+The earlier mixed-case aliases were removed. The principal replacements are:
+
+===============================  =============================
+Removed name                     Replacement
+===============================  =============================
+``xdata.ROIs``                   ``xdata.rois``
+``xdata.import_ROI()``           ``xdata.import_rois()``
+``xdata.crop_to_ROI()``          ``xdata.subset_to_roi()``
+``xdata.cropped_roi``            ``xdata.subset_roi``
+``xdata.assign_cells_to_ROIs()`` ``xdata.assign_cells_to_rois()``
+``xdata.assign_bins_to_ROIs()``  ``xdata.assign_bins_to_rois()``
+``read_ROI_from_csv()``          ``read_roi_from_csv()``
+``read_ROI_from_geojson()``      ``read_roi_from_geojson()``
+``ROI_to_pixels()``              ``roi_to_pixels()``
+===============================  =============================
+
 Lazy Loading
 ------------
 
@@ -85,15 +112,31 @@ Different Xenium software versions have used different
 ``cell_features/csc`` sparse arrays and older flat ``cell_features`` sparse
 arrays.
 
-Coordinate System
------------------
+Coordinate Systems
+------------------
 
-xentools plotting functions use Xenium micron coordinates. A bounds tuple is
-usually ordered as:
+xentools uses a platform-neutral coordinate system named ``global`` for
+Xenium, Atera, and imported modalities. Its axes are ``x`` and ``y``, its
+units are micrometers, and Y increases downward in image convention. Plotting
+uses descending Matplotlib Y limits; stored geometries and transforms are not
+reflected merely for display.
+
+Each spatial element retains its intrinsic coordinates and has a homogeneous
+3×3 transform into ``global``. Native transcript and ROI coordinates therefore
+use identity transforms, while image pixels use pixel-to-global transforms.
+Inspect these mappings with ``xdata.transforms`` or apply one directly:
+
+.. code-block:: python
+
+   print(xdata.transforms)
+   xy_global = xdata.transforms.apply("image:H&E", xy_pixels)
+
+A bounds tuple is ordered as:
 
 .. code-block:: python
 
    (xmin, xmax, ymin, ymax)
 
-The same convention is used by transcript queries, splat plots, image display,
-and boundary overlays.
+The same global convention is used by transcript queries, splat plots, image
+display, ROIs, and boundary overlays. Cropping changes only the view bounds; it
+never changes an element's transform.

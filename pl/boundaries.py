@@ -284,25 +284,18 @@ def plot_boundaries(
     edge_rgb = mcolors.to_rgb(edgecolor)
     edge_rgba = (*edge_rgb, edge_alpha)
 
-    if ax is not None:
-        y_lo, y_hi = ax.get_ylim()
-    elif xmin is not None:
+    if xmin is not None:
         y_lo, y_hi = ymin, ymax
     else:
         y_lo = gdf.geometry.bounds["miny"].min()
         y_hi = gdf.geometry.bounds["maxy"].max()
-
-    def _flip_coords(coords):
-        arr = np.array(coords)
-        arr[:, 1] = y_lo + y_hi - arr[:, 1]
-        return arr
 
     patches = []
     patch_facecolors = []
     for geom, rgba in zip(gdf.geometry, face_rgba):
         polys = [geom] if geom.geom_type == "Polygon" else list(geom.geoms)
         for poly in polys:
-            patches.append(MplPolygon(_flip_coords(poly.exterior.coords), closed=True))
+            patches.append(MplPolygon(np.asarray(poly.exterior.coords), closed=True))
             patch_facecolors.append(rgba)
 
     pc = PatchCollection(
@@ -321,7 +314,7 @@ def plot_boundaries(
             ax.set_xlim(xmin, xmax)
         else:
             ax.set_xlim(gdf.geometry.bounds["minx"].min(), gdf.geometry.bounds["maxx"].max())
-        ax.set_ylim(y_lo, y_hi)
+        ax.set_ylim(y_hi, y_lo)
 
     ax.add_collection(pc)
     ax.set_aspect("equal")

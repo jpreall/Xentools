@@ -5,6 +5,7 @@ from . import gene_sets
 from . import io
 from . import pl
 from . import utils
+from .settings import settings
 
 from .io.write.xenium import (
     write_xenium_gene_groups,
@@ -17,6 +18,8 @@ from .pl import (
     create_multilayer_image,
     niche_heatmap,
     niche_map,
+    show_aligned_image,
+    plot_housekeeping_diagnostics,
     plot_boundaries,
     plot_cells,
     plot_image,
@@ -34,12 +37,16 @@ from .pl import (
 )
 from .xentools import (
     XenData,
+    AlignedImage,
+    CoordinateSystem,
+    TransformRegistry,
     LazyTranscripts,
     LazyBoundaryGeoDataFrame,
     ROI,
     ROIClass,
     ROICollection,
-    ROI_to_pixels,
+    ROIGroup,
+    roi_to_pixels,
     import_cell_annotations,
     neighborhood_composition,
     gene_panel_to_dataframe,
@@ -47,11 +54,12 @@ from .xentools import (
     read_xenium_to_anndata,
     frame,
     um_to_pixels,
-    read_ROI_from_csv,
-    read_ROI_from_geojson,
+    read_roi_from_csv,
+    read_roi_from_geojson,
     build_niches,
     build_spatial_graph,
     evaluate_niche_k_values,
+    find_housekeeping_genes,
     normalize_tp10k,
 )
 
@@ -61,14 +69,19 @@ __all__ = [
     'gene_sets',
     'pl',
     'utils',
+    'settings',
     'write_xenium_gene_groups',
     'XenData', 
+    'AlignedImage',
+    'CoordinateSystem',
+    'TransformRegistry',
     'LazyTranscripts',
     'LazyBoundaryGeoDataFrame',
     'ROI',
     'ROIClass',
     'ROICollection',
-    'ROI_to_pixels',
+    'ROIGroup',
+    'roi_to_pixels',
     'import_cell_annotations',
     'neighborhood_composition',
     'gene_panel_to_dataframe',
@@ -82,6 +95,7 @@ __all__ = [
     'create_multilayer_image',
     'niche_heatmap',
     'niche_map',
+    'plot_housekeeping_diagnostics',
     'rasterize',
     'rasterize_rgb',
     'render',
@@ -95,12 +109,14 @@ __all__ = [
     'plot_points',
     'plot_splat',
     'show_ome_tiff',
+    'show_aligned_image',
     'splat',
-    'read_ROI_from_csv',
-    'read_ROI_from_geojson',
+    'read_roi_from_csv',
+    'read_roi_from_geojson',
     'build_niches',
     'build_spatial_graph',
     'evaluate_niche_k_values',
+    'find_housekeeping_genes',
     'normalize_tp10k',
     ]
 sys.modules.update({f"{__name__}.{m}": globals()[m] for m in ["analysis", "gene_sets", "io", "pl", "utils"]})

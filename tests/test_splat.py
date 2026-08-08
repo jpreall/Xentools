@@ -4,6 +4,7 @@ import matplotlib.axes
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+import warnings
 
 
 def _test_genes(xdata, n=3):
@@ -53,6 +54,66 @@ def test_xendata_splat_can_return_display_and_raw_arrays(xdata):
     assert display.min() >= 0
     assert display.max() <= 1
     assert np.issubdtype(raw.dtype, np.floating)
+
+
+def test_splat_auto_pixel_size_targets_pixel_budget(xdata):
+    gene = _test_genes(xdata, n=1)[0]
+
+    with pytest.warns(UserWarning, match="auto-selected"):
+        display = xdata.splat(
+            gene,
+            bounds=(0, 1000, 0, 1000),
+            pixel_size_um="auto",
+            target_pixels=10_000,
+            sigma_um=0,
+            smooth=False,
+            show_legend=False,
+            return_array=True,
+        )
+
+    assert display.shape[:2] == (100, 100)
+
+
+def test_splat_explicit_pixel_size_overrides_target_pixels(xdata):
+    gene = _test_genes(xdata, n=1)[0]
+
+    display = xdata.splat(
+        gene,
+        bounds=(0, 1000, 0, 1000),
+        pixel_size_um=100,
+        target_pixels=10_000,
+        sigma_um=0,
+        smooth=False,
+        show_legend=False,
+        return_array=True,
+    )
+
+    assert display.shape[:2] == (10, 10)
+
+
+def test_splat_auto_pixel_size_warning_respects_global_verbosity(xdata):
+    import xentools
+
+    gene = _test_genes(xdata, n=1)[0]
+    old_verbosity = xentools.settings.verbosity
+    xentools.settings.verbosity = 0
+    try:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            xdata.splat(
+                gene,
+                bounds=(0, 1000, 0, 1000),
+                pixel_size_um="auto",
+                target_pixels=10_000,
+                sigma_um=0,
+                smooth=False,
+                show_legend=False,
+                return_array=True,
+            )
+    finally:
+        xentools.settings.verbosity = old_verbosity
+
+    assert len(record) == 0
 
 
 def test_xendata_splat_single_gene_uses_scalar_default_gain(xdata):
