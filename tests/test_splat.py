@@ -334,6 +334,25 @@ def test_splat_uses_lazy_rasterize_fast_path():
     assert lazy.seen_quality == "all"
 
 
+def test_splat_forwards_opt_in_workers(monkeypatch):
+    import xentools
+
+    lazy = _FakeLazyTranscripts()
+    rasterize = lazy.rasterize_channels
+
+    def rasterize_with_workers(*args, workers, **kwargs):
+        assert workers == 4
+        assert type(workers) is int
+        return rasterize(*args, **kwargs)
+
+    monkeypatch.setattr(lazy, "rasterize_channels", rasterize_with_workers)
+    xentools.pl.splat(lazy, genes="g1", pixel_size_um=1, workers=np.int64(4))
+    assert lazy.seen_channel_gene_lists == [["g1"]]
+
+    with pytest.raises(ValueError, match="workers must be a positive integer"):
+        xentools.pl.splat(lazy, workers=0)
+
+
 def test_splat_clips_large_gene_signatures_with_warning():
     import xentools
 

@@ -7,6 +7,8 @@ import os
 import sys
 import importlib.util
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from typing import Literal
 
 import numpy as np
@@ -15,6 +17,12 @@ import pandas as pd
 
 _TRANSCRIPT_COLUMNS = ["x_location", "y_location", "feature_name"]
 _TRANSCRIPT_COLUMNS_WITH_Z = ["x_location", "y_location", "z_location", "feature_name"]
+
+
+def _normalize_raster_workers(workers):
+    if isinstance(workers, (bool, np.bool_)) or not isinstance(workers, (int, np.integer)) or workers < 1:
+        raise ValueError("workers must be a positive integer.")
+    return int(workers)
 
 
 def _load_local_module(module_name, relative_path):
@@ -666,6 +674,8 @@ class LazyTranscripts:
         bounds,
         pixel_size_um=1.0,
         quality: str = "high",
+        *,
+        workers: int = 1,
     ):
         """
         Bin zarr-backed transcripts directly into display channels.
@@ -674,9 +684,13 @@ class LazyTranscripts:
         building an intermediate DataFrame and never materializes string gene
         names. ``channel_gene_lists`` is a sequence where each item is the gene
         list assigned to that output channel.
+
+        ``workers`` sets the maximum number of threads reading and processing
+        tiles. The default of 1 processes tiles serially.
         """
         import zarr
 
+        workers = _normalize_raster_workers(workers)
         xmin, xmax, ymin, ymax = map(float, bounds)
         nx = int(np.ceil((xmax - xmin) / float(pixel_size_um)))
         ny = int(np.ceil((ymax - ymin) / float(pixel_size_um)))
@@ -684,9 +698,9 @@ class LazyTranscripts:
             raise ValueError("bounds must define a positive-width and positive-height region.")
 
         n_channels = len(channel_gene_lists)
-        rgb = np.zeros((ny, nx, n_channels), dtype=np.float32)
+        shape = (ny, nx, n_channels)
         if n_channels == 0:
-            return rgb
+            return np.zeros(shape, dtype=np.float32)
 
         tile_keys = self._candidate_tiles(xmin, xmax, ymin, ymax)
         q_slices = self._quality_slices(quality)
@@ -704,19 +718,22 @@ class LazyTranscripts:
                     gene_channel[gid] = channel_idx
 
         if not all_genes and not np.any(gene_channel >= 0):
-            return rgb
+            return np.zeros(shape, dtype=np.float32)
 
+        # Count repeated pixel indices across ranges in a single accumulator.
+        counts = np.zeros(n_channels * ny * nx, dtype=np.int64)
         selected_gene_ids = np.flatnonzero(gene_channel >= 0)
         store = zarr.storage.ZipStore(self._path, mode="r")
         try:
             grp = _open_zarr_group_compat(zarr, store, mode="r", force_v2=True)
-            for tile_key in tile_keys:
+
+            def tile_indices(tile_key):
                 prefix = f"grids/0/{tile_key}"
                 try:
                     loc_arr = grp[f"{prefix}/location"]
                     gid_arr = grp[f"{prefix}/gene_identity"]
                 except Exception:
-                    continue
+                    return
 
                 if all_genes:
                     ranges = [(0, int(self._tile_meta.get(tile_key, {}).get("n", 0)))]
@@ -724,7 +741,7 @@ class LazyTranscripts:
                     try:
                         offsets = grp[f"{prefix}/gene_offset"][:]
                     except Exception:
-                        continue
+                        return
                     ranges = []
                     for gid in selected_gene_ids:
                         if gid >= len(offsets):
@@ -735,7 +752,7 @@ class LazyTranscripts:
                                 ranges.append((s, e))
 
                 if not ranges:
-                    continue
+                    return
 
                 ranges.sort()
                 merged = [list(ranges[0])]
@@ -745,11 +762,21 @@ class LazyTranscripts:
                     else:
                         merged.append([s, e])
 
-                for s, e in merged:
-                    if e <= s:
-                        continue
-                    locs = loc_arr[s:e]
-                    gids = gid_arr[s:e, 0].astype(np.int64, copy=False)
+                if (
+                    len(merged) > 1
+                    and merged[0][0] >= 0
+                    and merged[-1][1] <= min(loc_arr.shape[0], gid_arr.shape[0])
+                ):
+                    # One orthogonal selection reads shared chunks once while
+                    # keeping the gaps between gene and quality ranges excluded.
+                    selections = [np.concatenate([np.arange(s, e, dtype=np.intp) for s, e in merged])]
+                else:
+                    # Slices retain clipping behavior for offsets outside the arrays.
+                    selections = [slice(s, e) for s, e in merged if e > s]
+
+                for rows in selections:
+                    locs = loc_arr.oindex[rows, :]
+                    gids = gid_arr.oindex[rows, 0].astype(np.int64, copy=False)
                     valid_gene = gids < len(gene_channel)
                     channels = np.full(len(gids), -1, dtype=np.int16)
                     channels[valid_gene] = gene_channel[gids[valid_gene]]
@@ -770,17 +797,29 @@ class LazyTranscripts:
                     if not valid_px.any():
                         continue
 
-                    flat = (
+                    yield (
                         ch[valid_px].astype(np.int64) * (ny * nx)
                         + y_idx[valid_px].astype(np.int64) * nx
                         + x_idx[valid_px].astype(np.int64)
                     )
-                    counts = np.bincount(flat, minlength=n_channels * ny * nx)
-                    rgb += counts.reshape(n_channels, ny, nx).transpose(1, 2, 0)
+
+            workers = min(workers, len(tile_keys))
+            if workers <= 1:
+                for tile_key in tile_keys:
+                    for flat in tile_indices(tile_key):
+                        np.add.at(counts, flat, 1)
+            else:
+                # Bound submitted tiles and keep accumulator writes on the calling thread.
+                pending = iter(tile_keys)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    while batch := tuple(islice(pending, 2 * workers)):
+                        for parts in pool.map(lambda key: tuple(tile_indices(key)), batch):
+                            for flat in parts:
+                                np.add.at(counts, flat, 1)
         finally:
             store.close()
 
-        return rgb
+        return counts.reshape(n_channels, ny, nx).transpose(1, 2, 0).astype(np.float32, order="C")
 
     def _load_tile(self, grp, tile_key, xmin, xmax, ymin, ymax, gene_ids, quality, include_z=False):
         prefix = f"grids/0/{tile_key}"

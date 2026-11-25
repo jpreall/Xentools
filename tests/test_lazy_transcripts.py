@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+import pytest
 
 
 def _first_tile_bounds(trans):
@@ -173,6 +175,143 @@ def test_lazy_transcripts_missing_gene_yields_no_tiles(xenium_testdata):
     diagnostic = trans.diagnose_query(genes=["definitely_not_a_gene"])
     assert diagnostic["candidate_tiles"] == 0
     assert diagnostic["returned_transcripts"] == 0
+
+
+@pytest.fixture
+def tiled_transcripts(tmp_path):
+    import zarr
+
+    from xentools.core.transcripts import LazyTranscripts, _open_zarr_group_compat
+
+    path = tmp_path / "transcripts.zarr.zip"
+    tiles = [
+        (
+            [
+                (0.5, 0.5), (0.5, 0.5), (0.75, 0.75), (0.125, 0.5), (1.5, 2.875),
+                (1.5, 1.5), (1.5, 1.5), (1.5, 0.125), (1.75, 2.75), (1.5, 1.5),
+            ],
+            [0, 0, 0, 0, 0, 1, 1, 1, 2, 99],
+            [(0, 1, 1, 5), (5, 6, 6, 8), (0, 0, 8, 9)],
+        ),
+        (
+            [(2.25, 0.25), (3.75, 2.75), (3.875, 2.75), (2.5, 1.5)],
+            [0, 1, 1, 2],
+            [(0, 0, 0, 1), (0, 0, 1, 3), (3, 6, 0, 0)],
+        ),
+    ]
+    with zarr.storage.ZipStore(str(path), mode="w") as store:
+        root = _open_zarr_group_compat(zarr, store, mode="w", force_v2=True)
+        grid = root.create_group("grids").create_group("0")
+        for col, (coords, genes, offsets) in enumerate(tiles):
+            tile = grid.create_group(f"{col},0")
+            locations = np.column_stack(
+                [np.asarray(coords, dtype=np.float32), np.zeros(len(coords), dtype=np.float32)]
+            )
+            gene_ids = np.asarray(genes, dtype=np.uint32)[:, None]
+            gene_offsets = np.asarray(offsets, dtype=np.uint32)
+            create = tile.create_array if hasattr(tile, "create_array") else tile.create_dataset
+            create("location", data=locations, chunks=(3, 3))
+            create("gene_identity", data=gene_ids, chunks=(4, 1))
+            create("gene_offset", data=gene_offsets, chunks=gene_offsets.shape)
+
+    return LazyTranscripts(path, ["A", "B", "C"], verbose=False)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_lazy_rasterize_channels_preserves_quality_assignment_and_bounds(tiled_transcripts, monkeypatch, workers):
+    from zipfile import ZipFile, ZipInfo
+
+    trans = tiled_transcripts
+    bounds = (0.25, 3.75, 0.25, 2.75)
+    channels = [["A", "B"], ["B", "C", "missing"]]
+    high = np.zeros((3, 4, 2), dtype=np.float32)
+    high[0, 0, 0] = 2
+    high[0, 2, 0] = 1
+    high[1, 1, 1] = 1
+    high[2, 1, 1] = 1
+    high[2, 3, 1] = 1
+    low = np.zeros_like(high)
+    low[0, 0, 0] = 1
+    low[1, 1, 1] = 1
+    low[1, 2, 1] = 1
+
+    shared_chunk = "grids/0/0,0/gene_identity/1.0"
+    chunk_reads = []
+    original_open = ZipFile.open
+
+    def record_chunk_reads(archive, name, *args, **kwargs):
+        member = name.filename if isinstance(name, ZipInfo) else name
+        if archive.filename == trans._path and member == shared_chunk:
+            chunk_reads.append(member)
+        return original_open(archive, name, *args, **kwargs)
+
+    monkeypatch.setattr(ZipFile, "open", record_chunk_reads)
+    for quality, expected in [("high", high), ("low", low), ("all", high + low)]:
+        chunk_reads.clear()
+        result = trans.rasterize_channels(channels, bounds, quality=quality, workers=workers)
+        np.testing.assert_array_equal(result, expected)
+        assert result.dtype == np.float32
+        assert result.flags.c_contiguous
+        # High-quality ranges [1, 5) and [6, 9) both touch gene rows [4, 8).
+        if quality == "high":
+            assert chunk_reads == [shared_chunk]
+
+    all_genes = trans.rasterize_channels([None], bounds, quality="high", workers=workers)
+    np.testing.assert_array_equal(all_genes, (high + low).sum(axis=2, keepdims=True))
+    missing = trans.rasterize_channels([["missing"]], bounds, workers=workers)
+    np.testing.assert_array_equal(missing, np.zeros((3, 4, 1), dtype=np.float32))
+
+    # The last low-quality range extends past the end of its tile.
+    without_b = high + low
+    without_b[1, 1, 1] = 0
+    without_b[2, 3, 1] = 0
+    clipped = trans.rasterize_channels([["A"], ["C"]], bounds, quality="all", workers=workers)
+    np.testing.assert_array_equal(clipped, without_b)
+
+
+def test_lazy_rasterize_worker_failure_waits_before_closing_store(tiled_transcripts, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    import zarr
+
+    trans = tiled_transcripts
+    monkeypatch.setattr(trans, "_candidate_tiles", lambda *bounds: ["0,0", "1,0"])
+    second_started = Event()
+    allow_second_to_finish = Event()
+    second_finished = Event()
+    closed_after_workers = []
+    select = zarr.Array.get_orthogonal_selection
+    close = zarr.storage.ZipStore.close
+    shutdown = ThreadPoolExecutor.shutdown
+
+    def select_with_failure(array, *args, **kwargs):
+        if array.path == "grids/0/0,0/location":
+            assert second_started.wait(timeout=5)
+            raise RuntimeError("tile read failed")
+        if array.path == "grids/0/1,0/location":
+            second_started.set()
+            assert allow_second_to_finish.wait(timeout=5)
+            result = select(array, *args, **kwargs)
+            second_finished.set()
+            return result
+        return select(array, *args, **kwargs)
+
+    def release_worker_at_shutdown(pool, *args, **kwargs):
+        allow_second_to_finish.set()
+        return shutdown(pool, *args, **kwargs)
+
+    def record_store_close(store):
+        closed_after_workers.append(second_finished.is_set())
+        return close(store)
+
+    monkeypatch.setattr(zarr.Array, "get_orthogonal_selection", select_with_failure)
+    monkeypatch.setattr(ThreadPoolExecutor, "shutdown", release_worker_at_shutdown)
+    monkeypatch.setattr(zarr.storage.ZipStore, "close", record_store_close)
+    with pytest.raises(RuntimeError, match="tile read failed"):
+        trans.rasterize_channels([None], (0.25, 3.75, 0.25, 2.75), workers=2)
+
+    assert closed_after_workers == [True]
 
 
 def test_lazy_transcripts_cache_info_and_clear_cache(xenium_testdata):

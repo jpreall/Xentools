@@ -15,11 +15,12 @@ from ._save import save_figure
 from ._shared import _load_local_module
 
 try:
-    from ..core.transcripts import LazyTranscripts
+    from ..core.transcripts import LazyTranscripts, _normalize_raster_workers
     from ..settings import settings
 except ImportError:
     _transcripts_mod = _load_local_module("_xentools_core_transcripts_for_pl", "core/transcripts.py")
     LazyTranscripts = _transcripts_mod.LazyTranscripts
+    _normalize_raster_workers = _transcripts_mod._normalize_raster_workers
     settings = _load_local_module("_xentools_settings_for_pl", "settings.py").settings
 
 
@@ -1207,6 +1208,8 @@ def splat(
     use_lazy_fast_path: bool = True,
     save=None,
     save_kwargs: Optional[dict] = None,
+    *,
+    workers: int = 1,
 ):
     """
     Rasterize transcript positions into one or more display channels.
@@ -1218,7 +1221,11 @@ def splat(
     ``pixel_size_um="auto"`` selects a display-oriented resolution from
     ``target_pixels``; pass a numeric ``pixel_size_um`` for fixed-resolution
     output.
+
+    Set ``workers`` to a positive integer to control tile processing on the
+    lazy Zarr fast path. The default of 1 processes tiles serially.
     """
+    workers = _normalize_raster_workers(workers)
     chan_names, gene_signatures, channel_gene_lists = _normalize_splat_channels(
         genes,
         max_signature_genes=max_signature_genes,
@@ -1269,11 +1276,13 @@ def splat(
                 warn_auto_pixel_size=warn_auto_pixel_size,
             )
             sigma_px = sigma_um / pixel_size_um
+            raster_kwargs = {"workers": workers} if workers > 1 else {}
             rgb = df.rasterize_channels(
                 channel_gene_lists,
                 bounds=(xmin, xmax, ymin, ymax),
                 pixel_size_um=pixel_size_um,
                 quality=quality,
+                **raster_kwargs,
             )
             rgb, disp, ax = _display_splat(
                 rgb,

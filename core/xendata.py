@@ -1163,7 +1163,8 @@ class XenData:
         **splat_kwargs
             Forwarded verbatim to the module-level ``splat()`` (e.g.
             ``pixel_size_um``, ``target_pixels``, ``sigma_um``, ``gains``,
-            ``smooth``). By default, ``pixel_size_um='auto'`` selects a
+            ``smooth``, ``workers``). Set ``workers`` above 1 to process lazy
+            Zarr tiles concurrently. By default, ``pixel_size_um='auto'`` selects a
             display-oriented resolution from ``target_pixels``; pass a numeric
             ``pixel_size_um`` to force exact output resolution.
             ``bounds`` is set automatically from the active ROI or the full
